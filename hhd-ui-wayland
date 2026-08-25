@@ -38,6 +38,15 @@ set -u
 export XDG_RUNTIME_DIR
 
 # Locate a wayland socket if hhd did not give us one (it never does).
+# hhd also strips DBUS_SESSION_BUS_ADDRESS, so Electron cannot reach the
+# session bus and spends startup retrying/timing out on it -- visible as
+# repeated "dbus/bus.cc:405 Failed to connect" and a noticeably slower open
+# than the XWayland path. Point it at the user's bus socket.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+    export DBUS_SESSION_BUS_ADDRESS
+fi
+
 if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
     for _s in "$XDG_RUNTIME_DIR"/wayland-*; do
         case "$_s" in *.lock) continue ;; esac
@@ -51,8 +60,14 @@ fi
 if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
     export WAYLAND_DISPLAY
     export ELECTRON_OZONE_PLATFORM_HINT=wayland
+    # NOTE: deliberately NOT passing WaylandWindowDecorations. That enables
+    # CLIENT-side decorations, i.e. Electron draws its own titlebar, which
+    # KWin's noborder rule cannot remove. Without it Electron uses server-side
+    # decorations and the KWin rule governs the frame.
+    #
+    # --ozone-platform=wayland alone is enough on current Electron; the extra
+    # UseOzonePlatform feature flag is legacy and only adds startup work.
     exec electron --no-sandbox \
-         --enable-features=UseOzonePlatform,WaylandWindowDecorations \
          --ozone-platform=wayland \
          --class=dev.hhd.hhd-ui \
          /usr/lib/hhd-ui/app.asar "$@"
