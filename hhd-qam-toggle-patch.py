@@ -21,7 +21,7 @@ IDEMPOTENT + REVERSIBLE
     python3 hhd-qam-toggle-patch.py --check    # report state, change nothing
     python3 hhd-qam-toggle-patch.py --revert   # restore originals
 """
-import os, py_compile, shutil, sys, glob
+import os, shutil, sys, glob
 
 MARK = "z13-qam-toggle"
 
@@ -39,16 +39,23 @@ def read(p):
 
 
 def write(p, s):
-    tmp = p + ".z13-tmp"
-    with open(tmp, "w") as f:
-        f.write(s)
+    # Syntax-check in memory. py_compile() was wrong here: it refuses cfile=
+    # /dev/null ("non-regular file"), and its exception is not PyCompileError,
+    # so it escaped the handler and leaked the temp file.
     try:
-        py_compile.compile(tmp, doraise=True, cfile=os.devnull)
-    except py_compile.PyCompileError as e:
-        os.unlink(tmp)
+        compile(s, p, "exec")
+    except SyntaxError as e:
         sys.exit(f"ERROR: patched {p} does not compile, aborting:\n{e}")
-    shutil.copymode(p, tmp)
-    os.replace(tmp, p)
+    tmp = p + ".z13-tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(s)
+        shutil.copymode(p, tmp)
+        os.replace(tmp, p)
+    except Exception:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def backup(p):
