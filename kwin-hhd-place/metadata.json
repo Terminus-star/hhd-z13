@@ -1,0 +1,15 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Id": "z13-hhd-place",
+        "Name": "Z13 hhd-ui placement",
+        "Description": "Places the Handheld Daemon overlay relative to the current screen, so it follows resolution and scale changes.",
+        "Version": "1.0",
+        "License": "MIT",
+        "Authors": [{ "Name": "z13" }],
+        "EnabledByDefault": true,
+        "ServiceTypes": ["KWin/Script"]
+    },
+    "X-Plasma-API": "declarativescript",
+    "X-Plasma-MainScript": "code/main.js"
+}
