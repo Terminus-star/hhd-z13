@@ -34,6 +34,10 @@ install -Dm755 "$SRC/hhd-ui-wayland" /usr/local/bin/hhd-ui-wayland
 install -Dm644 "$SRC/10-wayland-overlay.conf" /etc/systemd/system/hhd@.service.d/10-wayland-overlay.conf
 echo "  installed hook, patcher and Wayland wrapper"
 
+# Revert first: the patcher is idempotent and would otherwise report
+# "already patched" and skip, leaving an OLDER patch in place after an update
+# to this tooling. Reverting restores the pristine originals, then we re-apply.
+python3 /usr/local/lib/z13/hhd-qam-toggle-patch.py --revert >/dev/null 2>&1
 python3 /usr/local/lib/z13/hhd-qam-toggle-patch.py || exit 1
 systemctl daemon-reload
 echo

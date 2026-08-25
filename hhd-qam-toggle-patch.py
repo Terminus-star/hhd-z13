@@ -99,11 +99,21 @@ def patch_init(d):
     repl = (
         '                    case "hhd_qam":\n'
         f'                        # {MARK}: toggle instead of open-only.\n'
+        '                        # Two signals, because the two backends differ:\n'
+        '                        #  * gamescope path (loop_manage_overlay) parses\n'
+        '                        #    "stat:<status>" from the UI -> LAST_STATUS.\n'
+        '                        #  * desktop path (loop_manage_desktop) only ever\n'
+        '                        #    handles "grab:" lines and NEVER parses stat:,\n'
+        '                        #    so LAST_STATUS is permanently "closed" there.\n'
+        '                        #    Fall back to process liveness: on that path the\n'
+        '                        #    hhd-ui process lifetime IS the window lifetime\n'
+        '                        #    (the loop kills it in its finally: block).\n'
         '                        from .base import LAST_STATUS\n'
-        '                        if LAST_STATUS.get("v", "closed") != "closed":\n'
-        '                            cmd = "close"\n'
-        '                        else:\n'
-        '                            cmd = "open_qam"\n'
+        '                        _open = LAST_STATUS.get("v", "closed") != "closed"\n'
+        '                        if not _open:\n'
+        '                            _p = getattr(self.ovf, "proc", None)\n'
+        '                            _open = bool(_p is not None and _p.poll() is None)\n'
+        '                        cmd = "close" if _open else "open_qam"\n'
     )
     s = s.replace(anchor, repl, 1)
     write(p, s)

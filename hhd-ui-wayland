@@ -1,20 +1,53 @@
 #!/bin/sh
-# hhd-ui-wayland — run hhd's Electron UI natively on Wayland.
+# hhd-ui-wayland — run hhd's Electron UI natively on Wayland instead of XWayland.
 #
-# /usr/bin/hhd-ui is just:
-#     exec electron --no-sandbox /usr/lib/hhd-ui/app.asar $@
-# with no Ozone hints, so on KDE Wayland it lands on XWayland and is blurry on
-# a fractional-scaled 2560x1600 panel.
+# THE PROBLEM
+#   /usr/bin/hhd-ui is just:
+#       exec electron --no-sandbox /usr/lib/hhd-ui/app.asar $@
+#   with no Ozone hints, so it lands on XWayland and is blurry on a
+#   fractional-scaled panel.
 #
-# hhd picks the overlay binary from $HHD_OVERLAY before its built-in search
-# path (plugins/overlay/overlay.py: find_overlay_exe), so pointing that at this
-# wrapper needs no patching of hhd or hhd-ui.
+# WHY SETTING THE ENV IN hhd's SERVICE DOES NOT WORK
+#   hhd does not pass its environment through. plugins/overlay/overlay.py:
+#       launch_overlay_de(...) -> subprocess.Popen([fn], env={
+#           "HOME": ..., "XAUTHORITY": auth or "", "DISPLAY": display,
+#           "HHD_MANAGED": "1" })
+#   It builds a MINIMAL env from scratch — no WAYLAND_DISPLAY, no
+#   XDG_RUNTIME_DIR — and hands Electron an X11 DISPLAY. So an Ozone hint set
+#   anywhere upstream never arrives, and even when set here Electron cannot
+#   find a compositor to connect to.
 #
-# Both the env hint and the explicit flag are set: the hint is what modern
-# Electron honours, the flag is the fallback for older builds. If the Wayland
-# backend is unavailable Electron falls back to X11 by itself, so this is safe.
-export ELECTRON_OZONE_PLATFORM_HINT=auto
-exec electron --no-sandbox \
-     --enable-features=UseOzonePlatform,WaylandWindowDecorations \
-     --ozone-platform-hint=auto \
-     /usr/lib/hhd-ui/app.asar "$@"
+#   Therefore this wrapper reconstructs what it needs itself. hhd runs it as the
+#   target user, so the uid is correct for locating the runtime dir.
+#
+# SAFE FALLBACK
+#   If no Wayland socket is found we do NOT force Wayland; Electron keeps using
+#   the DISPLAY hhd supplied. Worst case is the previous blurry-but-working UI,
+#   never a UI that fails to start.
+set -u
+
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+
+# Locate a wayland socket if hhd did not give us one (it never does).
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    for _s in "$XDG_RUNTIME_DIR"/wayland-*; do
+        case "$_s" in *.lock) continue ;; esac
+        if [ -S "$_s" ]; then
+            WAYLAND_DISPLAY="${_s##*/}"
+            break
+        fi
+    done
+fi
+
+if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; then
+    export WAYLAND_DISPLAY
+    export ELECTRON_OZONE_PLATFORM_HINT=wayland
+    exec electron --no-sandbox \
+         --enable-features=UseOzonePlatform,WaylandWindowDecorations \
+         --ozone-platform=wayland \
+         /usr/lib/hhd-ui/app.asar "$@"
+fi
+
+# No compositor reachable — behave exactly like stock hhd-ui.
+exec electron --no-sandbox /usr/lib/hhd-ui/app.asar "$@"
