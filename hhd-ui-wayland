@@ -1,0 +1,20 @@
+#!/bin/sh
+# hhd-ui-wayland — run hhd's Electron UI natively on Wayland.
+#
+# /usr/bin/hhd-ui is just:
+#     exec electron --no-sandbox /usr/lib/hhd-ui/app.asar $@
+# with no Ozone hints, so on KDE Wayland it lands on XWayland and is blurry on
+# a fractional-scaled 2560x1600 panel.
+#
+# hhd picks the overlay binary from $HHD_OVERLAY before its built-in search
+# path (plugins/overlay/overlay.py: find_overlay_exe), so pointing that at this
+# wrapper needs no patching of hhd or hhd-ui.
+#
+# Both the env hint and the explicit flag are set: the hint is what modern
+# Electron honours, the flag is the fallback for older builds. If the Wayland
+# backend is unavailable Electron falls back to X11 by itself, so this is safe.
+export ELECTRON_OZONE_PLATFORM_HINT=auto
+exec electron --no-sandbox \
+     --enable-features=UseOzonePlatform,WaylandWindowDecorations \
+     --ozone-platform-hint=auto \
+     /usr/lib/hhd-ui/app.asar "$@"

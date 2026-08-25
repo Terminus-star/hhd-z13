@@ -1,0 +1,20 @@
+# Re-applies the z13 QAM-toggle patch after hhd is upgraded or reinstalled.
+#
+# pacman replaces the whole hhd package, silently reverting the patch. Without
+# this hook the Armoury button would quietly go back to open-only behaviour
+# after the next update, with nothing to indicate why.
+#
+# The patcher is idempotent and refuses to touch files whose anchors have moved
+# (i.e. after an hhd refactor), so a failed run leaves hhd usable rather than
+# broken -- it just prints an error you will see in the pacman output.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = hhd
+
+[Action]
+Description = Re-applying z13 hhd QAM-toggle patch...
+When = PostTransaction
+Exec = /usr/local/lib/z13/hhd-qam-toggle-patch.py
+Depends = python
