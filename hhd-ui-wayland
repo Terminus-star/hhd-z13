@@ -38,14 +38,12 @@ set -u
 export XDG_RUNTIME_DIR
 
 # Locate a wayland socket if hhd did not give us one (it never does).
-# hhd also strips DBUS_SESSION_BUS_ADDRESS, so Electron cannot reach the
-# session bus and spends startup retrying/timing out on it -- visible as
-# repeated "dbus/bus.cc:405 Failed to connect" and a noticeably slower open
-# than the XWayland path. Point it at the user's bus socket.
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
-    DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-    export DBUS_SESSION_BUS_ADDRESS
-fi
+# DELIBERATELY NOT setting DBUS_SESSION_BUS_ADDRESS.
+# hhd strips it, so Electron logs "dbus/bus.cc:405 Failed to connect" a few
+# times at startup. Those errors are cosmetic. Supplying the bus was measured
+# to make the UI open SLOWER, not faster -- launch->UI went 0.56s -> 0.87s,
+# because a working bus means Electron actually performs portal/service
+# lookups instead of failing fast. Speed wins; the log noise is harmless.
 
 if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
     for _s in "$XDG_RUNTIME_DIR"/wayland-*; do
