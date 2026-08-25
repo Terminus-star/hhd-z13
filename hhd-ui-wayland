@@ -24,6 +24,14 @@
 #   If no Wayland socket is found we do NOT force Wayland; Electron keeps using
 #   the DISPLAY hhd supplied. Worst case is the previous blurry-but-working UI,
 #   never a UI that fails to start.
+# APP-ID / KWIN RULE
+#   The KWin rule for this window matches wmclass=dev.hhd.hhd-ui. On X11 that
+#   is WM_CLASS, which Electron sets from the package name. On WAYLAND KWin
+#   matches app-id instead, and hhd-ui.desktop has no StartupWMClass, so
+#   Electron advertises something else and the rule stops matching -- the
+#   window then appears in the taskbar, loses always-on-top, borderless and
+#   centred placement. --class sets the Wayland app_id explicitly so the
+#   existing rule keeps working.
 set -u
 
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
@@ -46,8 +54,9 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; 
     exec electron --no-sandbox \
          --enable-features=UseOzonePlatform,WaylandWindowDecorations \
          --ozone-platform=wayland \
+         --class=dev.hhd.hhd-ui \
          /usr/lib/hhd-ui/app.asar "$@"
 fi
 
 # No compositor reachable — behave exactly like stock hhd-ui.
-exec electron --no-sandbox /usr/lib/hhd-ui/app.asar "$@"
+exec electron --no-sandbox --class=dev.hhd.hhd-ui /usr/lib/hhd-ui/app.asar "$@"
