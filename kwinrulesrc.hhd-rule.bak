@@ -31,11 +31,8 @@ wmclassmatch=1
 
 [a45b89cb-15df-465c-ba4b-d1e537b19ba8]
 Description=Handheld Daemon overlay behaviour
-above=true
-aboverule=3
 clientmachine=localhost
 decocolor=
-noborderrule=3
 skippagerrule=3
 skipswitcherrule=3
 skippager=true
@@ -43,7 +40,6 @@ skipswitcher=true
 types=1
 wmclass=dev[.-]hhd[.-]hhd-ui
 wmclassmatch=3
-noborder=true
 
 [General]
 count=4
