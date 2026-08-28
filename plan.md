@@ -1,7 +1,63 @@
-# hhd improvement plan
+# Plan 1 — hhd overlay and plugin work
 
-> **Copied from the session plan file, 2026-08-28.** Sits beside the patches it
+> **Project 1 of 2.** Independent of
+> [Plan 2 — hibernate GPU gate](../plan-hibernate-gpu-gate.md); they share no
+> files and can be done in either order.
+>
+> Copied from the session plan file, 2026-08-28. Sits beside the patches it
 > concerns. Superseded priorities are marked inline — read Part 0 first.
+
+---
+
+## Where everything lives
+
+### This directory (`~/Projects/hhd-patches`)
+
+| Path | What it is |
+|---|---|
+| `README.md` | traps, root-cause write-ups, the HANDOFF section |
+| `plan.md` | this file |
+| `install.sh` | installs everything below; `--revert` undoes it. Reverts then re-applies, so it upgrades cleanly |
+| `hhd-qam-toggle-patch.py` | the patcher — four guarded edits, `--check` / `--revert` |
+| `hhd-ui-wayland` | Electron launcher; picks X11 vs Wayland from hhd's env |
+| `10-wayland-overlay.conf` | systemd drop-in setting `HHD_OVERLAY` |
+| `99-z13-hhd-qam-toggle.hook` | pacman hook re-applying the patch after an hhd upgrade |
+| `kwin-hhd-place/` | KWin placement script |
+
+### Installed locations
+
+| Installed path | From |
+|---|---|
+| `/usr/local/lib/z13/hhd-qam-toggle-patch.py` | `hhd-qam-toggle-patch.py` — **this is what the pacman hook runs**, not the repo copy |
+| `/usr/local/bin/hhd-ui-wayland` | `hhd-ui-wayland` |
+| `/etc/pacman.d/hooks/99-z13-hhd-qam-toggle.hook` | `99-z13-hhd-qam-toggle.hook` |
+| `/etc/systemd/system/hhd@.service.d/10-wayland-overlay.conf` | `10-wayland-overlay.conf` |
+
+### Upstream hhd files the patcher edits
+
+`/usr/lib/python3*/site-packages/hhd/plugins/overlay/` —
+`base.py` (`z13-qam-toggle`, `z13-oneshot`), `__init__.py` (`z13-qam-toggle`),
+`x11.py` (`z13-vt-gate`). Pristine copies are kept beside each as `*.z13-orig`;
+`overlay.py` is read but never patched.
+
+### Cross-repo docs
+
+| Path | What it holds |
+|---|---|
+| `~/Projects/README.md` | authoritative top-level change log |
+| `~/Projects/MAP.md` | directory map of every project |
+| `~/Projects/documentation.md` | NTFS drivers, mount tooling, misc reference |
+| `~/Projects/plan-hibernate-gpu-gate.md` | **Plan 2**, the `z13-hibernate-plus` work |
+| `~/Projects/z13-hibernate-plus/` | separate git repo (gitlink here); sleep/hibernate stack |
+
+### Live diagnostics
+
+```bash
+python3 /usr/local/lib/z13/hhd-qam-toggle-patch.py --check   # 4 rows, all PATCHED
+journalctl -u hhd@$USER -n 100 --no-pager | grep OVRL
+pgrep -a gamescope                    # triage: a stray session breaks the overlay
+xwininfo -display :0 -root -children  # spot decoy windows (see README trap)
+```
 
 ---
 
@@ -294,6 +350,7 @@ nothing when flipped.
 | `~/Projects/README.md` | record the plugin route and the fork reasoning |
 
 Nothing under `/usr/lib/python3.*/site-packages/hhd/` is touched by the plugin.
+Full path inventory is in **Where everything lives** at the top of this file.
 
 ---
 
