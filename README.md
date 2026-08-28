@@ -17,6 +17,16 @@ resume ordering, and the traps — lives in `~/Projects/README.md`
 | `kwinrulesrc.hhd-rule.bak` | Snapshot of the working KWin rule (`~/.config` is not in a repo). |
 | `install.sh` | Applies or reverts everything. Reverts before applying, so an updated patch replaces an older one. |
 
+## `hhd-ui-wayland` picks its backend from hhd's env, not from sockets
+
+`STEAM_OVERLAY=1` (set by `inject_overlay`) means gamescope -> stay on X11,
+because hhd finds the UI by searching an X display. `HHD_MANAGED=1` (set by
+`launch_overlay_de`) means desktop -> Wayland is fine.
+
+Do not go back to deciding this from the `wayland-*` glob. It is only correct
+when gamescope is the only session; with Plasma up too they share
+`/run/user/1000` and the glob picks Plasma's socket.
+
 ## Three things that will bite you
 
 1. **`mount`-style helper shadowing:** `hhd` picks the overlay binary from

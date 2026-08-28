@@ -35,6 +35,14 @@
 #   existing rule keeps working.
 set -u
 
+# hhd says which path launched us, so do not infer it (overlay.py):
+#   inject_overlay()    gamescope -> STEAM_OVERLAY=1
+#   launch_overlay_de() desktop   -> HHD_MANAGED=1
+# The gamescope path needs an X11 window for find_hhd, so stay on X11 there.
+if [ "${STEAM_OVERLAY:-}" = "1" ]; then
+    exec electron --no-sandbox --class=dev.hhd.hhd-ui /usr/lib/hhd-ui/app.asar "$@"
+fi
+
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
 export XDG_RUNTIME_DIR
 
@@ -50,7 +58,9 @@ export XDG_RUNTIME_DIR
 # at gamescope-0.
 #
 #   A gamescope session has no wayland-* socket; its compositor socket is
-#   gamescope-0. That looks like a bug in the glob below, and it was changed to
+#   gamescope-0. (Only true when it is the ONLY session -- if Plasma is up too
+#   they share /run/user/1000, so KDE's wayland-0 sits beside gamescope-0 and
+#   the glob matches it. Hence the STEAM_OVERLAY guard above.) That looks like a bug in the glob below, and it was changed to
 #   match gamescope-<digits> on 2026-08-28. That made things WORSE and was
 #   reverted the same day.
 #
