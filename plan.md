@@ -5,11 +5,15 @@
 
 ---
 
-## Part 0 — NEW, AND HIGHER PRIORITY: session-aware gamescope detection
+## Part 0 — session-aware gamescope detection — **IMPLEMENTED 2026-08-28**
 
 **Found 2026-08-28 by a separate agent; full write-up in `README.md` under
-"HANDOFF".** This outranks everything below, because it breaks the overlay in
-*both* sessions today, whereas the rest of this plan adds features.
+"HANDOFF".** This outranked everything below, because it broke the overlay in
+*both* sessions, whereas the rest of this plan adds features.
+
+**Status: fixed.** `hhd-qam-toggle-patch.py` now carries two further guarded
+edits — `z13-vt-gate` (session-aware detection) and `z13-oneshot` (no endless
+relaunch). See "What shipped" below.
 
 ### The defect
 
@@ -29,7 +33,7 @@ WM_CLASS `dev.hhd.hhd-ui`, never finds it (the wrapper correctly launched a
 *Wayland* client on Plasma), and kills/relaunches on a ~10 s loop — the
 "transparent window that keeps reappearing".
 
-### Immediate workaround
+### Immediate workaround (superseded by the fix)
 
 ```bash
 loginctl terminate-session <the Desktop=gamescope one>
@@ -40,17 +44,54 @@ systemctl restart hhd@termis
 `pgrep -a gamescope` is the one-line triage whenever the overlay misbehaves in
 Plasma — the symptom looks nothing like the cause.
 
-### The fix, and why it belongs to this directory
+### What shipped
 
-The right change is to make the detection **session-aware**: return no
-gamescope displays when the *active* session is not a gamescope one
-(`loginctl show-session $XDG_SESSION_ID -p Desktop`, or comparing the socket's
-session against the active seat).
+Two additional edits in `hhd-qam-toggle-patch.py`, each with its own mark, its
+own anchors, and the same refuse-rather-than-guess behaviour as the toggle.
 
-`hhd-qam-toggle-patch.py` **already patches `plugins/overlay/*.py`** with
-`.z13-orig` backups, a compile check, anchor-refusal and a pacman hook. Adding
-a second, similarly-guarded edit costs almost nothing and reuses proven
-machinery — this is the natural home for it.
+**`z13-vt-gate` — `plugins/overlay/x11.py`**
+
+`get_gamescope_displays()` now switches `lsof` to `-Fpn` so it knows *which
+process* owns each X socket, reads that process's `XDG_VTNR` from
+`/proc/<pid>/environ`, and compares it against the foreground VT in
+`/sys/class/tty/tty0/active`. A gamescope instance on a background VT is
+skipped.
+
+Chosen over `loginctl show-session`: no subprocess, no logind round-trip, and
+it works even though gamescope lives in a **user service**
+(`gamescope-session.service`) rather than a session scope — so the obvious
+cgroup-to-session mapping would **not** have worked. `XDG_VTNR` is present in
+gamescope's environ; the cgroup path is not session-tagged.
+
+It **fails open**: if either VT number is unreadable, upstream behaviour is
+kept, because a broken overlay inside gamescope is worse than losing the
+desktop fallback. The one-shot latch below covers that case instead.
+
+Gating this one function is enough — `is_gamescope_running()`,
+`_open_overlay()` and `monitor_gamescope()` all route through it.
+
+**`z13-oneshot` — `plugins/overlay/base.py`**
+
+`launch_overlay()` latches after the first failed *automatic* attempt instead
+of retrying every `OVERLAY_CHECK_INTERVAL` (5 s) forever. The latch clears on
+an explicit QAM press (`update()`), and re-arms when gamescope is no longer on
+the active VT — so entering gamescope works normally again.
+
+Deliberately belt-and-braces: the vt-gate stops this loop from starting, the
+latch stops *any* future unlaunchable overlay from becoming a spawn/kill cycle.
+
+### Verified
+
+| Condition | `get_gamescope_displays()` | Path taken |
+|---|---|---|
+| gamescope on VT2, active VT3 | `[]` | desktop |
+| active VT is gamescope's | `[':0', ':1']` | gamescope |
+| VT unreadable | `[':0', ':1']` | upstream fallback |
+| no `XDG_VTNR` | `[':0', ':1']` | upstream fallback |
+
+Patcher tested against copies of both pristine-upstream and
+already-toggle-patched files: all three files compile, every mark lands, and a
+second run is a no-op.
 
 ### DO NOT re-attempt the wrapper socket glob
 
@@ -63,8 +104,12 @@ what proved the wrapper was never at fault.
 
 ### Open, needs measurement
 
-* Whether terminating the stray session actually restores the overlay —
-  **diagnosed but not verified**.
+* **Live confirmation** — the logic is verified against real `/proc` and real
+  VT state, but hhd has not yet been restarted onto the patched files (needs
+  root).
+* Terminating the stray session is no longer needed, so it was never verified.
+  The fix makes hhd ignore a backgrounded gamescope rather than requiring you
+  to kill it.
 * Which of gamescope's two Xwayland displays (`:0`/`:1`) hhd picks. Logged only
   at `logger.debug`, and `setup_logger` hardcodes `level=logging.INFO`
   (`hhd/logging.py`), so `HHD_DEBUG=1` does **not** expose it — surfacing it

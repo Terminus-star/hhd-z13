@@ -12,6 +12,16 @@
 #                               would silently revert it
 #   3. hhd-ui-wayland           runs the Electron UI natively on Wayland so it
 #                               is sharp instead of blurry XWayland
+#
+# The patcher applies four guarded edits in total:
+#   z13-qam-toggle   base.py + __init__.py   Armoury button toggles the QAM
+#   z13-vt-gate      x11.py                  gamescope detection is session-aware
+#                                            (a backgrounded gamescope session
+#                                            otherwise made hhd hunt for its UI
+#                                            on gamescope's X display forever)
+#   z13-oneshot      base.py                 a failed automatic overlay launch
+#                                            latches instead of retrying every
+#                                            5s forever
 set -uo pipefail
 SRC="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }

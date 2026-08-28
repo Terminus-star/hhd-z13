@@ -32,6 +32,10 @@ resume ordering, and the traps — lives in `~/Projects/README.md`
 
 ## ROOT CAUSE: a leftover gamescope session breaks the overlay in KDE, 2026-08-28
 
+> **RESOLVED 2026-08-28.** Fixed by the `z13-vt-gate` and `z13-oneshot` edits in
+> `hhd-qam-toggle-patch.py`; see `plan.md` -> "Part 0 / What shipped". The
+> analysis below is kept because it is the reasoning the fix rests on.
+
 **This is the actual cause of the dead Armoury button, in both sessions.**
 
 `hhd` decides whether it is "in gamescope" purely by looking for a running
@@ -143,6 +147,10 @@ Electron ever creates a window on it.
 ---
 
 # HANDOFF: overlay dead in Plasma — hhd's gamescope detection is process-based
+
+> **RESOLVED 2026-08-28.** Fixed by the `z13-vt-gate` and `z13-oneshot` edits in
+> `hhd-qam-toggle-patch.py`; see `plan.md` -> "Part 0 / What shipped". The
+> analysis below is kept because it is the reasoning the fix rests on.
 
 **For whoever maintains this directory.** Written 2026-08-28 by a different
 agent that did *not* write these patches. Nothing here has been fixed — the
