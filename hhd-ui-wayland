@@ -24,7 +24,8 @@
 #   If no Wayland socket is found we do NOT force Wayland; Electron keeps using
 #   the DISPLAY hhd supplied. Worst case is the previous blurry-but-working UI,
 #   never a UI that fails to start.
-# APP-ID / KWIN RULE
+# APP-ID / KWIN RULE  (Plasma only -- there is no KWin in a gamescope session,
+#   where --class is simply inert rather than harmful)
 #   The KWin rule for this window matches wmclass=dev.hhd.hhd-ui. On X11 that
 #   is WM_CLASS, which Electron sets from the package name. On WAYLAND KWin
 #   matches app-id instead, and hhd-ui.desktop has no StartupWMClass, so
@@ -44,12 +45,39 @@ export XDG_RUNTIME_DIR
 # to make the UI open SLOWER, not faster -- launch->UI went 0.56s -> 0.87s,
 # because a working bus means Electron actually performs portal/service
 # lookups instead of failing fast. Speed wins; the log noise is harmless.
+#
+# GAMESCOPE SESSION
+#   There is no wayland-* socket there at all -- the compositor's socket is
+#   gamescope-0. Globbing only wayland-* matched nothing, so this fell through
+#   to the X11 fallback and the overlay never appeared, while hhd logged
+#   "Executing overlay command: 'open_qam'" as if all were well.
+#
+#   Match gamescope-<digits> exactly. The runtime dir also holds gamescope-0-ei
+#   (an EIS socket, not Wayland), gamescope-stats and gamescope-environment;
+#   connecting Electron to any of those would fail.
+#
+#   Prefer a real wayland-* when both exist: under Plasma that is the session
+#   compositor, and gamescope-* would only be a nested instance.
 
 if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
     for _s in "$XDG_RUNTIME_DIR"/wayland-*; do
         case "$_s" in *.lock) continue ;; esac
         if [ -S "$_s" ]; then
             WAYLAND_DISPLAY="${_s##*/}"
+            break
+        fi
+    done
+fi
+
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+    for _s in "$XDG_RUNTIME_DIR"/gamescope-*; do
+        _n="${_s##*/}"
+        # gamescope-0 yes; gamescope-0-ei, *.lock, -stats, -environment no.
+        case "$_n" in
+            gamescope-*[!0-9]*) continue ;;
+        esac
+        if [ -S "$_s" ]; then
+            WAYLAND_DISPLAY="$_n"
             break
         fi
     done

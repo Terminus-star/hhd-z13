@@ -29,3 +29,39 @@ resume ordering, and the traps — lives in `~/Projects/README.md`
 3. **Do NOT re-add `DBUS_SESSION_BUS_ADDRESS`** to the wrapper. Measured: it
    makes startup *slower* (0.56 s -> 0.87 s). The `dbus/bus.cc:405` errors are
    cosmetic.
+
+## Gamescope session: the socket is `gamescope-0`, not `wayland-*`
+
+Symptom: in the standalone gamescope session the Armoury button does nothing.
+hhd is working correctly — the journal shows the gesture and the command:
+
+```
+OVRL INFO  Gesture: custom_armoury, section: custom, key: armoury
+OVRL INFO  Executing overlay command: 'open_qam'
+OVRL INFO  Found overlay executable '/usr/local/bin/hhd-ui-wayland'
+OVRL INFO  Overlay launched.
+OVRL ERROR Overlay thread died
+```
+
+Cause: a gamescope session has **no `wayland-*` socket at all**. Its runtime
+dir holds `gamescope-0` (plus `gamescope-0-ei`, `gamescope-stats`,
+`gamescope-environment`). The wrapper globbed only `wayland-*`, found nothing,
+and fell through to the X11 fallback — so it never got a compositor, exactly
+the situation the fallback was meant to be a last resort for.
+
+The wrapper now looks for `gamescope-<digits>` when no `wayland-*` exists,
+matching the number strictly so the EIS socket (`gamescope-0-ei`) and the
+non-socket `gamescope-stats` / `gamescope-environment` entries are skipped. A
+real `wayland-*` still wins when both are present, since under Plasma that is
+the session compositor and any `gamescope-*` would be a nested instance.
+
+Verified against the live runtime dir and three synthetic ones:
+
+| runtime dir contains | picked |
+|---|---|
+| gamescope-0, -ei, .lock, -stats, -environment | `gamescope-0` |
+| wayland-0 + lock | `wayland-0` |
+| wayland-1 + gamescope-0 | `wayland-1` |
+
+Note `--class=dev.hhd.hhd-ui` is inert in a gamescope session — there is no
+KWin and therefore no rule to match — but harmless.
