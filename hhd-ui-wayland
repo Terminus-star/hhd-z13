@@ -46,38 +46,33 @@ export XDG_RUNTIME_DIR
 # because a working bus means Electron actually performs portal/service
 # lookups instead of failing fast. Speed wins; the log noise is harmless.
 #
-# GAMESCOPE SESSION
-#   There is no wayland-* socket there at all -- the compositor's socket is
-#   gamescope-0. Globbing only wayland-* matched nothing, so this fell through
-#   to the X11 fallback and the overlay never appeared, while hhd logged
-#   "Executing overlay command: 'open_qam'" as if all were well.
+# GAMESCOPE SESSION -- MUST STAY ON X11. Do not "fix" this by pointing Electron
+# at gamescope-0.
 #
-#   Match gamescope-<digits> exactly. The runtime dir also holds gamescope-0-ei
-#   (an EIS socket, not Wayland), gamescope-stats and gamescope-environment;
-#   connecting Electron to any of those would fail.
+#   A gamescope session has no wayland-* socket; its compositor socket is
+#   gamescope-0. That looks like a bug in the glob below, and it was changed to
+#   match gamescope-<digits> on 2026-08-28. That made things WORSE and was
+#   reverted the same day.
 #
-#   Prefer a real wayland-* when both exist: under Plasma that is the session
-#   compositor, and gamescope-* would only be a nested instance.
+#   Why: hhd's overlay handler finds the UI by searching an X display for
+#   WM_CLASS dev.hhd.hhd-ui --
+#       plugins/overlay/x11.py:  find_hhd() -> find_win(disp, ["dev.hhd.hhd-ui"])
+#       plugins/overlay/base.py: if not hhd: "UI Window not found, exitting overlay."
+#   In a gamescope session hhd selects a gamescope X display (gamescope runs two
+#   Xwayland servers, :0 and :1) and hands the wrapper DISPLAY=. It expects an
+#   X11 window back. Connect Electron to gamescope-0 as a native Wayland client
+#   and there is no X window at all, so find_hhd can never succeed.
+#
+#   So on gamescope the X11 fallback below is CORRECT, not a failure mode.
+#   Note "UI Window not found" was already occurring before that change, so the
+#   gamescope overlay has a separate, still-undiagnosed problem -- but making
+#   the UI a Wayland client removes any chance of it working.
 
 if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
     for _s in "$XDG_RUNTIME_DIR"/wayland-*; do
         case "$_s" in *.lock) continue ;; esac
         if [ -S "$_s" ]; then
             WAYLAND_DISPLAY="${_s##*/}"
-            break
-        fi
-    done
-fi
-
-if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
-    for _s in "$XDG_RUNTIME_DIR"/gamescope-*; do
-        _n="${_s##*/}"
-        # gamescope-0 yes; gamescope-0-ei, *.lock, -stats, -environment no.
-        case "$_n" in
-            gamescope-*[!0-9]*) continue ;;
-        esac
-        if [ -S "$_s" ]; then
-            WAYLAND_DISPLAY="$_n"
             break
         fi
     done

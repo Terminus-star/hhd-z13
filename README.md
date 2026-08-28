@@ -30,38 +30,43 @@ resume ordering, and the traps — lives in `~/Projects/README.md`
    makes startup *slower* (0.56 s -> 0.87 s). The `dbus/bus.cc:405` errors are
    cosmetic.
 
-## Gamescope session: the socket is `gamescope-0`, not `wayland-*`
+## Gamescope session: the overlay must stay on X11 (reverted change)
 
-Symptom: in the standalone gamescope session the Armoury button does nothing.
-hhd is working correctly — the journal shows the gesture and the command:
+**Recorded so the same wrong turn is not taken again.**
+
+A gamescope session has no `wayland-*` socket — its compositor socket is
+`gamescope-0`. The wrapper's glob therefore matches nothing there and falls
+through to the X11 fallback, which *looks* like the bug behind a dead Armoury
+button. On 2026-08-28 the glob was extended to match `gamescope-<digits>`.
+**That made it worse and was reverted the same day.**
+
+Why it was wrong: hhd finds the UI by searching an **X display** for WM_CLASS
+`dev.hhd.hhd-ui`.
 
 ```
-OVRL INFO  Gesture: custom_armoury, section: custom, key: armoury
-OVRL INFO  Executing overlay command: 'open_qam'
-OVRL INFO  Found overlay executable '/usr/local/bin/hhd-ui-wayland'
-OVRL INFO  Overlay launched.
-OVRL ERROR Overlay thread died
+plugins/overlay/x11.py   find_hhd()  -> find_win(disp, ["dev.hhd.hhd-ui"])
+plugins/overlay/base.py  if not hhd: "UI Window not found, exitting overlay."
 ```
 
-Cause: a gamescope session has **no `wayland-*` socket at all**. Its runtime
-dir holds `gamescope-0` (plus `gamescope-0-ei`, `gamescope-stats`,
-`gamescope-environment`). The wrapper globbed only `wayland-*`, found nothing,
-and fell through to the X11 fallback — so it never got a compositor, exactly
-the situation the fallback was meant to be a last resort for.
+In a gamescope session hhd selects a gamescope X display — gamescope runs two
+Xwayland servers, `:0` and `:1` — and hands the wrapper `DISPLAY=`, expecting an
+X11 window back. Point Electron at `gamescope-0` as a native Wayland client and
+there is no X window at all, so `find_hhd` can never succeed.
 
-The wrapper now looks for `gamescope-<digits>` when no `wayland-*` exists,
-matching the number strictly so the EIS socket (`gamescope-0-ei`) and the
-non-socket `gamescope-stats` / `gamescope-environment` entries are skipped. A
-real `wayland-*` still wins when both are present, since under Plasma that is
-the session compositor and any `gamescope-*` would be a nested instance.
+**On gamescope the X11 fallback is correct, not a failure mode.**
 
-Verified against the live runtime dir and three synthetic ones:
+### Still unresolved
 
-| runtime dir contains | picked |
-|---|---|
-| gamescope-0, -ei, .lock, -stats, -environment | `gamescope-0` |
-| wayland-0 + lock | `wayland-0` |
-| wayland-1 + gamescope-0 | `wayland-1` |
+`UI Window not found` was already being logged *before* that change, so the
+gamescope overlay has a separate problem. What is known:
 
-Note `--class=dev.hhd.hhd-ui` is inert in a gamescope session — there is no
-KWin and therefore no rule to match — but harmless.
+* The button works: `Gesture: custom_armoury` -> `Executing overlay command:
+  'open_qam'` -> `Overlay launched`.
+* hhd then fails to find the window within `STARTUP_MAX_DELAY` and exits, on a
+  loop.
+* hhd's display selection itself succeeds — it gets past `get_overlay_display`
+  to "Attempting to launch overlay". Which of `:0`/`:1` it picked is only
+  logged at debug level, so that is the next thing to capture.
+
+Next step is hhd debug logging, to see the chosen `DISPLAY` and whether
+Electron ever creates a window on it.
