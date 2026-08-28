@@ -30,6 +30,75 @@ resume ordering, and the traps — lives in `~/Projects/README.md`
    makes startup *slower* (0.56 s -> 0.87 s). The `dbus/bus.cc:405` errors are
    cosmetic.
 
+## ROOT CAUSE: a leftover gamescope session breaks the overlay in KDE, 2026-08-28
+
+**This is the actual cause of the dead Armoury button, in both sessions.**
+
+`hhd` decides whether it is "in gamescope" purely by looking for a running
+process holding an X11 socket:
+
+```python
+# plugins/overlay/x11.py
+def get_gamescope_displays():
+    """Returns X11 UNIX sockets from gamescope opened under /tmp"""
+    files = subprocess.run(["lsof", "-c", "gamescope-wl", "-Fn"], ...)
+```
+
+Switching from the gamescope session to Plasma **does not end it**. It stays
+alive on its own VT:
+
+```
+$ loginctl list-sessions
+12  1000 termis seat0 21775 user tty2 no -      <- Desktop=gamescope, State=online
+
+$ pgrep -a gamescope
+21779 /bin/bash /usr/bin/start-gamescope-session
+21891 gamescope --generate-drm-mode fixed --xwayland-count 2 ... -e -R ...
+
+$ lsof -c gamescope-wl -Fn | grep X11-unix
+/tmp/.X11-unix/X0
+/tmp/.X11-unix/X1
+```
+
+So while sitting in Plasma, hhd still believes gamescope is active, takes the
+**X11 overlay path** aimed at gamescope's display, and never reaches the
+compatibility-QAM path that Plasma needs. Meanwhile `hhd-ui-wayland` correctly
+launches the UI as a **Wayland** client on the Plasma compositor. hhd then
+searches the wrong display for WM_CLASS `dev.hhd.hhd-ui`, fails, kills the UI
+and relaunches:
+
+```
+OVRL INFO   Overlay launched.
+OVRL ERROR  UI Window not found, exitting overlay.   (~10s later)
+OVRL ERROR  Overlay thread died
+```
+
+**That loop is the "transparent window that keeps reappearing" in KDE** — each
+cycle is a fresh Electron window flashing up before hhd kills it.
+
+### Fix
+
+End the orphaned session, then restart hhd:
+
+```bash
+loginctl terminate-session 12      # the Desktop=gamescope one
+systemctl restart hhd@termis
+```
+
+Confirm it is really gone before restarting hhd — `pgrep -a gamescope` must be
+empty, otherwise hhd will take the same wrong path again.
+
+### Why this matters beyond today
+
+Any time the gamescope session has been used and left running, hhd's overlay
+will misbehave in Plasma, with a symptom that looks nothing like its cause.
+`pgrep -a gamescope` is the one-line check.
+
+It also explains the earlier confusion: the gamescope-socket "fix" was chasing
+a wrapper that was behaving correctly the whole time.
+
+---
+
 ## Gamescope session: the overlay must stay on X11 (reverted change)
 
 **Recorded so the same wrong turn is not taken again.**
