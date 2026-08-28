@@ -17,6 +17,28 @@ resume ordering, and the traps — lives in `~/Projects/README.md`
 | `kwinrulesrc.hhd-rule.bak` | Snapshot of the working KWin rule (`~/.config` is not in a repo). |
 | `install.sh` | Applies or reverts everything. Reverts before applying, so an updated patch replaces an older one. |
 
+## TRAP: `--class` creates a decoy window that hhd matches first
+
+Never pass `--class` to hhd-ui on gamescope. Electron sanitises dots to dashes
+for the real window's WM_CLASS, but applies `--class` verbatim to a 10x10
+helper window:
+
+```
+$ xwininfo -display :0 -root -children
+0x3200004 "Handheld Daemon": ("dev-hhd-hhd-ui" "dev-hhd-hhd-ui")  2560x1600
+0x3400001 "electron":        ("electron" "dev.hhd.hhd-ui")        10x10
+```
+
+`find_hhd()` is `find_win(["dev.hhd.hhd-ui"]) or find_win(["dev-hhd-hhd-ui"])`
+-- it tries the **dotted** name first, so it matches the 10x10 stub and applies
+every overlay atom (`STEAM_OVERLAY`, `STEAM_INPUT_FOCUS`, and the opacity
+restore in `show_hhd`) to it. The real window is never composited as an
+overlay. Symptom: an invisible overlay that appears to "crash", plus focus
+churn that resets gamescope's game border highlight.
+
+`--class` is still required on Plasma, where the KWin rule matches app-id.
+The wrapper passes it only on the desktop path.
+
 ## `hhd-ui-wayland` picks its backend from hhd's env, not from sockets
 
 `STEAM_OVERLAY=1` (set by `inject_overlay`) means gamescope -> stay on X11,

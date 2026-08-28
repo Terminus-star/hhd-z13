@@ -24,8 +24,24 @@
 #   If no Wayland socket is found we do NOT force Wayland; Electron keeps using
 #   the DISPLAY hhd supplied. Worst case is the previous blurry-but-working UI,
 #   never a UI that fails to start.
-# APP-ID / KWIN RULE  (Plasma only -- there is no KWin in a gamescope session,
-#   where --class is simply inert rather than harmful)
+# APP-ID / KWIN RULE  (Plasma ONLY -- must never be passed on gamescope)
+#   WRONG UNTIL 2026-08-28: this said --class was "inert rather than harmful"
+#   in a gamescope session. It is harmful. It creates a DECOY WINDOW that hhd
+#   matches in preference to the real UI:
+#
+#     $ xwininfo -display :0 -root -children
+#     0x3200004 "Handheld Daemon": ("dev-hhd-hhd-ui" "dev-hhd-hhd-ui") 2560x1600
+#     0x3400001 "electron":        ("electron" "dev.hhd.hhd-ui")       10x10
+#
+#   Electron sanitises dots to dashes for the real window's WM_CLASS, but
+#   --class is applied verbatim to a 10x10 helper window. find_hhd() is
+#       find_win(["dev.hhd.hhd-ui"]) or find_win(["dev-hhd-hhd-ui"])
+#   so it tries the DOTTED name first, matches the 10x10 stub, and applies
+#   every overlay atom (STEAM_OVERLAY, STEAM_INPUT_FOCUS, the opacity restore
+#   in show_hhd) to it. The real window is never composited as an overlay:
+#   an invisible overlay, plus focus churn that resets gamescope's game
+#   border highlight. Stock hhd-ui passes no --class, so only the dashed
+#   window exists and the second find_win matches correctly.
 #   The KWin rule for this window matches wmclass=dev.hhd.hhd-ui. On X11 that
 #   is WM_CLASS, which Electron sets from the package name. On WAYLAND KWin
 #   matches app-id instead, and hhd-ui.desktop has no StartupWMClass, so
@@ -38,9 +54,12 @@ set -u
 # hhd says which path launched us, so do not infer it (overlay.py):
 #   inject_overlay()    gamescope -> STEAM_OVERLAY=1
 #   launch_overlay_de() desktop   -> HHD_MANAGED=1
-# The gamescope path needs an X11 window for find_hhd, so stay on X11 there.
+#
+# On gamescope stay on X11 (hhd finds the UI by searching an X display) and
+# pass NO --class -- identical to stock hhd-ui. --class is actively HARMFUL
+# here, see the decoy-window note below.
 if [ "${STEAM_OVERLAY:-}" = "1" ]; then
-    exec electron --no-sandbox --class=dev.hhd.hhd-ui /usr/lib/hhd-ui/app.asar "$@"
+    exec electron --no-sandbox /usr/lib/hhd-ui/app.asar "$@"
 fi
 
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
