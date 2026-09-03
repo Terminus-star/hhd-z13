@@ -1,33 +1,9 @@
-[04f6ae69-0363-45ab-b585-89db15b16c05]
-Description=Window settings for steam_app_1240440
-clientmachine=localhost
-fpplevelrule=2
-fsplevelrule=2
-strictgeometryrule=2
-title=Halo Infinite
-titlematch=1
-types=1
-wmclass=steam_app_1240440
-wmclassmatch=1
-
-[35620e4e-b184-42c7-afb6-38a657c69c33]
-Description=Application settings for davinci-resolve
-blockcompositingrule=2
-clientmachine=localhost
-noborderrule=2
-types=1
-wmclass=davinci-resolve
-wmclassmatch=1
-
-[3c4a95f9-9c71-47e0-95ce-abf2c36daf5a]
-Description=Window settings for brave-ponfpcnoihfmfllpaingbgckeeldkhle-Default
-above=true
-aboverule=3
-title=Enhancer for YouTube™
-types=1
-wmclass=brave brave-ponfpcnoihfmfllpaingbgckeeldkhle-Default
-wmclasscomplete=true
-wmclassmatch=1
+# Snapshot of the KWin rule this patch set relies on.
+# ~/.config/kwinrulesrc is not itself in a repo, so the relevant rule is
+# recorded here. Unrelated personal rules have been stripped.
+#
+# Merge this into ~/.config/kwinrulesrc, adding the UUID to [General] rules=
+# and incrementing count=, then: qdbus org.kde.KWin /KWin reconfigure
 
 [a45b89cb-15df-465c-ba4b-d1e537b19ba8]
 Description=Handheld Daemon overlay behaviour
@@ -42,5 +18,5 @@ wmclass=dev[.-]hhd[.-]hhd-ui
 wmclassmatch=3
 
 [General]
-count=4
-rules=a45b89cb-15df-465c-ba4b-d1e537b19ba8,3c4a95f9-9c71-47e0-95ce-abf2c36daf5a,04f6ae69-0363-45ab-b585-89db15b16c05,35620e4e-b184-42c7-afb6-38a657c69c33
+count=1
+rules=a45b89cb-15df-465c-ba4b-d1e537b19ba8
