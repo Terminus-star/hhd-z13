@@ -1,0 +1,65 @@
+z13_display:
+  title: Z13 Display
+  type: container
+  tags: [ non-essential ]
+  hint: >-
+    Internal panel refresh rate (60/180 Hz), via kscreen-doctor -- run
+    inside your KDE Wayland session, not by hhd directly, since hhd itself
+    runs as root and has no session of its own from which to reach the
+    compositor. Requires the KDE desktop to be the FOREGROUND session: if
+    gamescope currently owns the screen (this session backgrounded), no
+    KScreen is reachable to change, so the control below is replaced with a
+    status message instead of silently doing nothing when flipped.
+  children:
+    status:
+      type: mode
+      tags: [no_dropdown]
+      default: unavailable
+      modes:
+        available:
+          type: container
+          children:
+            refresh_rate:
+              type: multiple
+              title: Refresh Rate
+              tags: [ordinal]
+              default: "180"
+              options:
+                "60": 60 Hz (Battery)
+                "180": 180 Hz (High)
+              hint: >-
+                Switches the internal panel (eDP-1) only -- an external
+                display, if connected, is left alone. Applied immediately;
+                on the very first read after hhd starts, this instead
+                silently adopts whatever the panel is already running at,
+                so starting hhd never itself changes your screen.
+                If a nested gamescope session is running, its framerate
+                cap follows this setting -- 60 Hz caps the game at 60, and
+                going back to 180 lifts the cap. gamescope's own refresh
+                cannot be changed after it starts, so capping the game is
+                what stops it rendering above what the panel is showing.
+            vrr:
+              type: multiple
+              title: Adaptive Sync
+              tags: [ordinal]
+              default: automatic
+              options:
+                never: Never
+                automatic: Automatic
+                always: Always
+              hint: >-
+                KDE's variable refresh policy for the internal panel. Automatic
+                engages it only for windows KWin judges eligible; Always keeps it
+                on. Applied with kscreen-doctor, the same way the refresh rate
+                above is, so it takes effect immediately rather than at next
+                login. Adopted silently on the first read, so starting hhd never
+                changes it by itself.
+        unavailable:
+          type: container
+          children:
+            reason:
+              type: display
+              tags: [error]
+              title: Unavailable
+              default: >-
+                No usable KDE Wayland session detected yet.

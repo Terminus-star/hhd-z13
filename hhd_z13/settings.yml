@@ -1,0 +1,132 @@
+z13_cpu:
+  title: Z13 CPU
+  type: container
+  tags: [ non-essential ]
+  hint: >-
+    CPU power controls via z13ctl-plus. Replaces hhd's own CPU Power/Boost
+    sliders under Processor Settings, which either duplicate this (EPP) or do
+    not currently work on this hardware (Boost, frequency floor) -- see
+    hhd-patches/hhd-qam-toggle-patch.py's z13-cpu-disable-native patch, which
+    removes hhd's own controls so the two do not race the same sysfs files.
+  children:
+    epp:
+      type: multiple
+      title: CPU Power (EPP)
+      tags: [ordinal]
+      default: balance_power
+      options:
+        power: Low
+        balance_power: Balanced
+        balance_performance: High
+        performance: Max
+      hint: >-
+        Energy Performance Preference -- a per-core HINT to the CPU's own
+        firmware governor about how aggressively to chase frequency, not a
+        frequency setter itself. Reach for this for everyday, ongoing bias:
+        "Low" for a quiet lap on battery, "Balanced" for general use, "High"
+        or "Max" when you want the CPU to ramp up faster under load and are
+        willing to trade battery/heat for it. It takes effect immediately and
+        stays until you change it again or a z13ctl-plus preset overrides it
+        on an AC/battery transition. Includes the full "Max" (performance)
+        value, which hhd's own equivalent control deliberately excludes.
+        Setting this also pins scaling_governor=powersave in the background
+        (best-effort): the alternative governor, "performance", locks EPP to
+        a fixed value and makes it unwritable, so this control silently stops
+        working under that governor unless something re-pins it first.
+    boost:
+      type: multiple
+      title: CPU Boost
+      tags: [ordinal]
+      default: enabled
+      options:
+        enabled: Enabled
+        disabled: Disabled
+      hint: >-
+        Enables or disables CPU boost (opportunistic clocks above the base
+        frequency for short bursts). Leave enabled for normal use; disable
+        only if you specifically want to cap peak clocks for heat/battery
+        reasons independent of EPP.
+    perf_mode:
+      type: multiple
+      title: CPU Perf Mode
+      tags: [ordinal]
+      default: disabled
+      options:
+        disabled: Disabled
+        enabled: Enabled
+      hint: >-
+        A one-tap PRESET, not an independent setting: flips EPP=Max, raises
+        the frequency floor, and turns boost on, all in one step -- for
+        latency-sensitive workloads (emulators) where you want the CPU to
+        never idle down between AC/battery-preset changes. Reach for this
+        instead of the EPP slider when you want a temporary, easily-reversed
+        "go fast now" state rather than a lasting bias: the state right
+        before you enabled it (including an active z13ctl-plus preset) is
+        snapshotted, and turning this back off restores exactly that --
+        never a hardcoded default. Because it is a snapshot/restore switch,
+        avoid also hand-tuning EPP/Boost while it is enabled -- turning Perf
+        Mode back off restores the ORIGINAL snapshot, not whatever you
+        changed in the meantime, so a manual tweak made during Perf Mode is
+        discarded rather than kept. Turning Perf Mode on while CPU Frequency
+        Control below is set to Manual is not blocked, but re-creates
+        exactly this same conflict against the manual sliders -- switch
+        Frequency Control back to Auto first if you want to use Perf Mode.
+    freq_mode:
+      type: mode
+      title: CPU Frequency Control
+      tags: [non-essential]
+      default: auto
+      hint: >-
+        Auto/Manual gate for a fixed frequency floor/ceiling, independent of
+        EPP. "Auto" leaves frequency limits alone entirely -- EPP, CPU Perf
+        Mode, and (if you have it enabled) z13ctl-plus's own automatic
+        AC/battery preset switching stay in full control, exactly as
+        before this control existed. "Manual" exposes fixed floor/ceiling
+        sliders below and starts them from whatever the CPU's live clocks
+        are at the moment you switch in, not a stale leftover value.
+        Entering Manual turns CPU Perf Mode off first (running whatever it
+        would have restored), since Perf Mode also writes floor+ceiling as
+        one unit and would otherwise immediately fight the manual sliders.
+        z13ctl-plus's own automatic preset switching is NOT touched by this
+        control -- if you have that enabled, an AC/battery transition can
+        still overwrite the manual floor behind your back; disable it
+        yourself with `z13ctl-plus preset policy --disable` if you want the
+        manual sliders to hold regardless of power source.
+      modes:
+        auto:
+          type: container
+          title: Auto
+        manual:
+          type: container
+          title: Manual
+          children:
+            min_freq:
+              type: int
+              title: CPU Frequency Floor
+              tags: [non-essential]
+              default: 625
+              unit: MHz
+              min: 625
+              max: 5187
+              step: 100
+              hint: >-
+                Fixed floor for the lowest clock any core is allowed to idle
+                down to. Raising it above the current ceiling (the Ceiling
+                slider below) is rejected rather than silently clamped -- if
+                a change here appears to do nothing, check the Ceiling
+                slider first.
+            max_freq:
+              type: int
+              title: CPU Frequency Ceiling
+              tags: [non-essential]
+              default: 5187
+              unit: MHz
+              min: 625
+              max: 5187
+              step: 100
+              hint: >-
+                Fixed ceiling for the highest clock any core is allowed to
+                reach -- independent of Boost, which only gates whether
+                opportunistic bursts above the base clock happen at all.
+                Lowering it below the current floor (the Floor slider
+                above) is rejected rather than silently clamped.
