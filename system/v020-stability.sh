@@ -25,9 +25,9 @@ DO_JOURNALD=1     # §1b  give journald a retention policy it can actually satis
 DO_AFFINITY=1     # §1c  slow the 3-second GPU-affinity timer
 DO_PERMS=1        # §3   drop the dangerous sysfs grants
 DO_MKINITCPIO=1   # §4   one MODULES= line, drop the dead hook, rebuild + verify
-DO_TDP=1          # §5   raise the below-floor custom.tdp
+DO_TDP=0          # §5   OFF BY DEFAULT -- see the section, the premise was wrong
 
-TDP_VALUE=45      # §5   new custom.tdp. Firmware floor is 28 W, ceiling 80 W.
+TDP_VALUE=45      # §5   only used if you deliberately set DO_TDP=1
 AFFINITY_SEC=30   # §1c  new timer interval (was 3s)
 
 TARGET_USER=termis
@@ -315,11 +315,21 @@ if [ "$DO_TDP" = 1 ]; then
   head_ "§5  hhd custom.tdp"
   S=/etc/hhd/state.yml
   CUR=$(grep -A3 '^      custom:' "$S" 2>/dev/null | grep -m1 '^        tdp:' | awk '{print $2}')
-  FLOOR=$(cat /sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/min_value 2>/dev/null || echo '?')
-  CEIL=$(cat /sys/class/firmware-attributes/asus-armoury/attributes/ppt_pl1_spl/max_value 2>/dev/null || echo '?')
-  say "stored custom.tdp: ${CUR:-<none>}   firmware SPL range: ${FLOOR}-${CEIL} W"
-  say "tdp_enable is currently $(grep -m1 'tdp_enable:' "$S" | awk '{print $2}') --"
-  say "so this value is inert today, and would apply the moment TDP is enabled."
+  say "stored custom.tdp: ${CUR:-<none>}"
+  say ""
+  say "THIS SECTION IS OFF BY DEFAULT. The plan called for raising custom.tdp"
+  say "to 45 because 9 W looked like an accident below a 28 W floor. That was"
+  say "wrong -- 28 comes only from asus-armoury's own min_value, which is that"
+  say "interface's advertised minimum, not a hardware limit. Every other source"
+  say "disagrees:"
+  say "  adjustor Z1_DATA (this exact model)   min_tdp: 5"
+  say "  adjustor's own TDP slider              min: 0, max: 30"
+  say "  asus-nb-wmi (z13ctl-plus + adjustor)   exposes no bounds files at all"
+  say "  z13ctl-plus                            documents only upper caps"
+  say "  measured                               9 W, 15 W and 20 W all worked"
+  say ""
+  say "So 9 is a deliberate, valid, mid-slider value. Leave it alone unless you"
+  say "actually want a different number, in which case set DO_TDP=1 above."
   if [ -z "$CUR" ]; then
     skip "no custom.tdp key found"
   elif [ "$CUR" = "$TDP_VALUE" ]; then
@@ -341,7 +351,7 @@ if [ "$DO_TDP" = 1 ]; then
     fi
     [ "$WAS_ACTIVE" = active ] && systemctl start "hhd@$TARGET_USER" && say "started hhd@$TARGET_USER"
   else
-    would "set custom.tdp $CUR -> $TDP_VALUE (below the ${FLOOR} W firmware floor at present)"
+    would "set custom.tdp $CUR -> $TDP_VALUE"
   fi
 fi
 

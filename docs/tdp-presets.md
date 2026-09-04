@@ -51,7 +51,9 @@ one.
 is why N presets need something on top, and why they want a PPT *triple* rather
 than one figure.
 
-### Firmware calibration is populated, so ranges self-derive
+### The TDP floor is 5 W, not 28 — and this decides which interface to write
+
+`asus-armoury` advertises calibration per attribute:
 
 | attribute | current | min | max | default |
 |---|---|---|---|---|
@@ -59,9 +61,41 @@ than one figure.
 | `ppt_pl2_sppt` | 75 | 32 | 92 | — |
 | `ppt_pl3_fppt` | 86 | 45 | 93 | — |
 
-Read these at `settings()` time instead of hardcoding. They survive firmware
-updates, and they are the authority on what is even accepted — note the SPL
-floor is **28 W**, so the stored `custom.tdp: 9` was never applicable.
+An earlier draft took that `min: 28` as the hardware floor and concluded a 9 W
+setting was invalid. **That was wrong.** 28 is what the *asus-armoury interface*
+advertises for itself, not what the hardware accepts. Six sources:
+
+| source | floor |
+|---|---|
+| `asus-armoury` `min_value` | **28** |
+| adjustor `Z1_DATA` — keyed on `"ROG Flow Z13 GZ302"`, this exact model | **5** |
+| adjustor's own TDP slider (`drivers/asus/settings.yml`) | **0** (max 30) |
+| `asus-nb-wmi` | no bounds files exist at all |
+| `z13ctl-plus` | documents only *upper* caps (75 W, 93 W with `--force`) |
+| measured on this machine | 9 W, 15 W, 20 W all worked |
+
+Only the armoury interface claims 28, and it is the outlier. `custom.tdp: 9` is
+a deliberate, mid-slider, working value.
+
+### Therefore: write `asus-nb-wmi`, not `asus-armoury`
+
+This reverses the earlier recommendation. `asus-nb-wmi` wins on every axis that
+matters here:
+
+- **No artificial floor.** Armoury's 28 W minimum would reject the 9/15/20 W
+  presets that are the entire point of this feature.
+- **More knobs.** nb-wmi exposes five (`ppt_pl1_spl`, `ppt_pl2_sppt`,
+  `ppt_fppt`, `ppt_apu_sppt`, `ppt_platform_sppt`); armoury exposes three.
+- **It is where everything else already writes.** Both `adjustor_asus` and
+  `z13ctl-plus` use it. Converging there means one interface, not a third one.
+- **It is not deprecated.** The kernel emits no deprecation warning for it;
+  `asus_wmi` and `asus-armoury` are both loaded and current. The "kernel-
+  deprecated" note in the older plan is unsubstantiated here.
+
+Armoury stays useful for one thing: its `max_value` figures are a reasonable
+*upper* calibration hint, and they corroborate z13ctl-plus's 93 W ceiling. Read
+maxima from armoury if you like; ignore its minima and floor at 5 W per
+`Z1_DATA`.
 
 ### The blocking dependency: two interfaces, two answers
 
@@ -72,16 +106,20 @@ The same three hardware limits, read through both interfaces, right now:
 | `asus-nb-wmi` — where `adjustor_asus` writes | 45 | 45 | 45 |
 | `asus-armoury` — firmware-calibrated | 60 | 75 | 86 |
 
-`adjustor_asus` is loaded and writes `/sys/devices/platform/asus-nb-wmi/ppt_*`,
-the kernel-deprecated path. It rewrites them on every mode change, AC/DC
-transition and wakeup.
+`adjustor_asus` is loaded and writes `/sys/devices/platform/asus-nb-wmi/ppt_*`.
+It rewrites them on every mode change, AC/DC transition and wakeup. So does
+`z13ctl-plus`. That is three writers on one set of registers.
 
-**This must be resolved before presets are worth building.** Two writers on the
-same registers through two interfaces that disagree produces exactly the
-"TDP reverts by itself" behaviour already seen. The fix is the treatment already
-applied to the CPU controls: extend `z13-cpu-disable-native` in
-`hhd-patches/hhd-qam-toggle-patch.py` to neuter `adjustor_asus`'s PPT writes, so
-hhd-z13 is the only writer and it writes `asus-armoury`.
+The divergence above is not two interfaces contradicting each other about the
+same value — it is nb-wmi showing the last *override* written to it (45 across
+the board) while armoury reports the firmware profile's own numbers. Reading one
+after writing the other is how "the TDP reverted" gets misdiagnosed.
+
+**This must be resolved before presets are worth building.** The fix is the
+treatment already applied to the CPU controls: extend `z13-cpu-disable-native`
+in `hhd-patches/hhd-qam-toggle-patch.py` to neuter `adjustor_asus`'s PPT writes,
+and make z13ctl-plus's startup re-apply conditional, so hhd-z13 is the single
+writer — on `asus-nb-wmi`, per the section above.
 
 Corollary, and the rule that caught this: **read back through the interface you
 wrote.** Writing armoury and verifying via nb-wmi would have shown 45 and looked
@@ -123,9 +161,12 @@ z13_tdp:
           type: mode
           children:
             name:   { type: display }
-            spl:    { type: int, min: 28, max: 80 }   # from min_value/max_value
-            sppt:   { type: int, min: 32, max: 92 }
-            fppt:   { type: int, min: 45, max: 93 }
+            # floor 5 per Z1_DATA -- NOT armoury's min_value, which would
+            # reject the 9/15/20 W presets this feature exists for.
+            # maxima may be read from armoury's max_value as a hint.
+            spl:    { type: int, min: 5, max: 80 }
+            sppt:   { type: int, min: 5, max: 92 }
+            fppt:   { type: int, min: 5, max: 93 }
             reports:                                   # what KDE is told
               type: discrete
               options: { "power-saver": Silent, "balanced": Balanced,
@@ -152,12 +193,17 @@ made panel overdrive worth decoupling from refresh rate.
 
 On preset selection:
 
-1. Clamp each value to the firmware `min_value`/`max_value` — never write an
-   out-of-range figure and hope.
-2. Write `spl`, then `sppt`, then `fppt` to
-   `asus-armoury/attributes/ppt_*/current_value`. Ascending order, because the
-   firmware rejects a configuration where a lower tier exceeds a higher one.
-3. Read all three **back through `asus-armoury`** and log a warning on mismatch.
+1. Clamp to `5 .. max`. The floor is `Z1_DATA.min_tdp`, **not** armoury's
+   `min_value` — clamping to 28 would silently raise a 9 W preset to 28 W and
+   look like the TDP "reverting" all over again.
+2. Write `ppt_pl1_spl`, then `ppt_pl2_sppt`, then `ppt_fppt` under
+   `/sys/devices/platform/asus-nb-wmi/`. Ascending order, because the firmware
+   rejects a configuration where a lower tier exceeds a higher one.
+   `ppt_apu_sppt` and `ppt_platform_sppt` exist here too — z13ctl-plus sets both
+   to the PL2 value, which is a sane default to copy.
+3. Read all three **back through `asus-nb-wmi`** and log a warning on mismatch.
+   Verifying via armoury will show the firmware profile's numbers instead and
+   look like a failure that did not happen.
 4. Set PPD `ActiveProfile` to the preset's `reports` value so KDE follows.
 
 Re-apply on resume and on AC/DC transition — those are precisely the events
@@ -170,7 +216,7 @@ may reset them.
 
 | | |
 |---|---|
-| **v0.2.0** (now) | Raise `custom.tdp` above the 28 W floor. No preset work. |
+| **v0.2.0** (now) | **Nothing.** `custom.tdp: 9` is valid and deliberate; leave it. The earlier "raise it above the floor" item was based on the false 28 W floor and has been dropped. |
 | **prereq** | Extend `z13-cpu-disable-native` to `adjustor_asus`'s PPT writes. Nothing below is trustworthy until PPT has one writer. |
 | **v0.5.0** | The tree above: 4 slots, firmware-derived ranges, PPD mapping, resume/AC re-apply. |
 | **later** | Per-preset fan curve and CPU boost, if wanted. Deliberately out of scope at first — one new writer at a time. |
@@ -188,4 +234,8 @@ values at all, and it must be turned on before any of this does anything.
 - **Deriving the KDE profile from SPL with no override.** Silent coupling.
 - **Reusing `/etc/hhd/profiles` as preset storage.** Whole-config snapshots,
   wrong granularity for a toggle. Still useful for stacking on top.
-- **Writing `asus-nb-wmi`.** Deprecated, and it is what currently disagrees.
+- **Writing `asus-armoury`.** Its `min_value` of 28 W would reject the low
+  presets this feature exists for, and it exposes three knobs where nb-wmi
+  exposes five. Its `max_value` figures are still worth reading as calibration.
+- **Clamping to armoury's advertised minimum.** That is the specific mistake
+  that produced the false "9 W is below the floor" conclusion.
