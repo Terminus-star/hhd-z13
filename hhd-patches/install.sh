@@ -13,7 +13,7 @@
 #   3. hhd-ui-wayland           runs the Electron UI natively on Wayland so it
 #                               is sharp instead of blurry XWayland
 #
-# The patcher applies four guarded edits in total:
+# The patcher applies these guarded edits:
 #   z13-qam-toggle   base.py + __init__.py   Armoury button toggles the QAM
 #   z13-vt-gate      x11.py                  gamescope detection is session-aware
 #                                            (a backgrounded gamescope session
@@ -22,6 +22,16 @@
 #   z13-oneshot      base.py                 a failed automatic overlay launch
 #                                            latches instead of retrying every
 #                                            5s forever
+#   z13-cpu-disable  adjustor/drivers/gpu/   adjustor stops writing CPU boost,
+#   -native          __init__.py             EPP and cpufreq behind hhd-z13's
+#                    adjustor/fuse/gpu.py    back. Two files: the supports_*
+#                                            flags alone leave three ungated
+#                                            call sites able to rewrite every
+#                                            cpufreq policy, which is what kept
+#                                            re-baking the 3000 MHz ceiling.
+#
+# `--check` reports PARTIAL, not PATCHED, when only some edits of a group are
+# present -- a half-patched adjustor still writes cpufreq.
 set -uo pipefail
 SRC="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
