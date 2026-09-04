@@ -213,7 +213,10 @@ fi
 # ─────────────────────────────────────────────── 7. no side effects
 hd "7. No side effects from testing"
 
-N=$(pgrep -c gamescope 2>/dev/null || echo 0)
+# `pgrep -c` prints 0 AND exits 1 on no match, so `|| echo 0` would append a
+# second zero and produce "0\n0" -> "[: integer expected".
+N=$(pgrep -c gamescope 2>/dev/null || true)
+N=${N:-0}
 [ "$N" -le 2 ] && p "stray gamescope processes" "$N (0 on desktop, 2 in game mode)" \
                || w "stray gamescope processes" "$N — check for leaked sessions"
 
