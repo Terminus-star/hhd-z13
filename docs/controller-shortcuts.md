@@ -80,6 +80,65 @@ external controllers by construction, not by misconfiguration.
   otherwise swallow them. `meta_hold` is currently bound to `steam_qam`; it
   could be pointed at `hhd_qam` instead.
 
+## Could hhd own an external pad the way it owns a handheld's?
+
+Yes, architecturally — and **all the machinery already exists**. It is not a
+new mechanism, just a missing plugin.
+
+`hhd/device/rog_ally/base.py` is the reference:
+
+```python
+d_xinput = GenericGamepadEvdev(..., hide=True)   # grab + hide the physical pad
+...
+unhide_all()                                     # on exit
+```
+
+`hide=True` (`hhd/controller/lib/hide.py`) makes the physical device invisible
+to everything else, and hhd publishes a virtual controller in its place —
+`controller/virtual/uinput/const.py` already ships `xbox_360`, `xbox_one`,
+`xbox_one_elite` and `xbox_sx` descriptors. Steam then talks to the virtual
+device while hhd keeps the physical one, so chords are always visible.
+
+Incidentally this is the same mechanism as the "hidden device" check at
+`controllers.py:875` — hhd clears the group-read bit to hide a pad it owns,
+and the shortcut watcher skips devices in that state.
+
+**What is missing** is a device plugin that selects on the *controller's*
+VID/PID. Every existing plugin — including `generic` — is chosen by machine
+**DMI product name** (`CONFS.get(dmi)`), because they all assume a built-in
+controller. This machine reports `ROG Flow Z13 GZ302EA_GZ302EA`, which is in
+no table, and has no built-in pad anyway.
+
+Real difficulties, roughly in order of nastiness:
+
+1. **Racing Steam for the grab.** A Bluetooth pad that connects while Steam is
+   already running may be grabbed by Steam first. Handhelds dodge this because
+   hhd hides the device from boot, before Steam exists. Needs udev-driven
+   hide-on-connect, and it must win every time or the shortcut silently stops
+   working — the exact failure being debugged here.
+2. **Force feedback.** This pad advertises FF (`FF=107030000`). Rumble has to
+   be forwarded from the virtual device back to the physical one, or every
+   game loses vibration.
+3. **Identity.** The virtual device's VID/PID decides Steam's button glyphs and
+   which Steam Input template applies. Publishing as `xbox_sx` is the obvious
+   choice for an Xbox pad, but it must be right or the UI lies.
+4. **Blast radius.** If hhd grabs and then dies without reaching
+   `unhide_all()`, the controller is unusable until something unhides it. This
+   sits in the input path for the *whole system*, not just the QAM.
+5. **Hotplug churn.** BT reconnects change the device node; hide+grab has to be
+   redone each time.
+6. **A third consumer.** `gsr-ui` also holds the device open.
+
+Estimate: a new device plugin of roughly 300–500 lines modelled on
+`rog_ally/base.py`. This is a **device driver**, a different class of work from
+the settings plugin hhd-z13 is today, and it would benefit every desktop or
+tablet user with an external pad — so it belongs upstream as a generic feature
+rather than a Z13 special case.
+
+Sequencing: it is the riskiest item proposed for this project, because failure
+mode is "controller stops working system-wide" rather than "a toggle does
+nothing". It should come after the existing feature ladder, not before it.
+
 ## Consequence for the upstream plan
 
 The `xbox_x` duplicate-case fix is still worth submitting — it is one line and
