@@ -69,6 +69,34 @@ restore() { # restore <file>
   fi
 }
 
+# install_conf <path>  -- desired content on stdin. Writes ONLY if the content
+# differs, and returns 0 when it changed so the caller can reload/restart.
+#
+# Deliberately content-based, not `[ -e "$path" ] && skip`. An existence check
+# means a corrected script can never fix a machine that ran the broken version:
+# the file is already there, so it is skipped forever. That is exactly how the
+# §1c timer drop-in stayed broken across a re-apply.
+install_conf() {
+  local path=$1 want
+  want=$(cat)
+  if [ -e "$path" ] && [ "$(cat "$path" 2>/dev/null)" = "$want" ]; then
+    skip "$path already correct"
+    return 1
+  fi
+  if [ "$MODE" = "--apply" ]; then
+    mkdir -p "$(dirname "$path")"
+    printf '%s\n' "$want" > "$path"
+    did "wrote $path"
+    return 0
+  fi
+  if [ -e "$path" ]; then
+    would "REWRITE $path -- present but content differs from desired"
+  else
+    would "write $path"
+  fi
+  return 1
+}
+
 # Run a systemctl --user command as TARGET_USER, which needs their bus.
 user_systemctl() {
   local uid; uid=$(id -u "$TARGET_USER") || return 1
@@ -157,13 +185,7 @@ if [ "$DO_JOURNALD" = 1 ]; then
     say "(threshold currently satisfied -- setting it explicitly anyway, since"
     say " the margin here is thin and it silently vacuums when crossed)"
   fi
-  D=/etc/systemd/journald.conf.d
-  F=$D/99-z13-retention.conf
-  if [ -e "$F" ]; then
-    skip "$F already present"
-  elif [ "$MODE" = "--apply" ]; then
-    mkdir -p "$D"
-    cat > "$F" <<'EOF'
+  if install_conf /etc/systemd/journald.conf.d/99-z13-retention.conf <<'EOF'
 # z13 v0.2.0: give journald limits it can actually satisfy.
 #
 # SystemKeepFree is the important one. Its default is 15% of the filesystem;
@@ -176,10 +198,8 @@ SystemKeepFree=2G
 SystemMaxUse=2G
 MaxRetentionSec=1month
 EOF
-    did "wrote $F"
+  then
     systemctl restart systemd-journald && did "restarted systemd-journald"
-  else
-    would "write $F with SystemKeepFree=2G, SystemMaxUse=2G, MaxRetentionSec=1month"
   fi
 fi
 
@@ -191,13 +211,7 @@ if [ "$DO_AFFINITY" = 1 ]; then
   else
     say "currently OnUnitActiveSec=3s -> ~28,800 runs/day, 3 journal lines each"
     say "(~86,000 lines/day; it was 540 of the last 567 system-journal entries)"
-    D=/etc/systemd/system/z13-gpu-compute-affinity.timer.d
-    F=$D/99-z13-interval.conf
-    if [ -e "$F" ]; then
-      skip "$F already present"
-    elif [ "$MODE" = "--apply" ]; then
-      mkdir -p "$D"
-      cat > "$F" <<EOF
+    if install_conf /etc/systemd/system/z13-gpu-compute-affinity.timer.d/99-z13-interval.conf <<EOF
 # z13 v0.2.0: 3s was pointlessly aggressive for a process-affinity sweep and
 # dominated the system journal. Drop-in so the packaged unit stays untouched.
 #
@@ -211,11 +225,19 @@ OnUnitActiveSec=
 OnUnitActiveSec=${AFFINITY_SEC}s
 AccuracySec=5s
 EOF
-      did "wrote $F (interval ${AFFINITY_SEC}s)"
+    then
       systemctl daemon-reload && systemctl restart z13-gpu-compute-affinity.timer \
         && did "reloaded and restarted the timer"
-    else
-      would "write $F setting OnUnitActiveSec=${AFFINITY_SEC}s"
+    fi
+    # verify the list really was reset, not appended to
+    if [ "$MODE" = "--apply" ]; then
+      NVAL=$(systemctl show z13-gpu-compute-affinity.timer -p TimersMonotonic --value 2>/dev/null \
+             | grep -o 'OnUnitActiveUSec=' | wc -l)
+      if [ "$NVAL" -gt 1 ]; then
+        echo "  ERROR: $NVAL OnUnitActiveUSec values loaded -- the list was not reset."
+      else
+        did "timer has exactly one interval loaded"
+      fi
     fi
   fi
 fi
