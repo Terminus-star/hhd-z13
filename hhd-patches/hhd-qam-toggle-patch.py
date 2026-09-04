@@ -29,9 +29,39 @@ ONE-SHOT AUTOMATIC LAUNCH (z13-oneshot)
     attempt latches; an explicit QAM press retries exactly once, and leaving
     gamescope re-arms it.
 
+DISABLE ADJUSTOR'S NATIVE CPU CONTROL (z13-cpu-disable-native)
+    adjustor ships inside the hhd package and loads as a second plugin in the
+    same process. It writes CPU boost, EPP and -- the dangerous one --
+    scaling_min_freq/scaling_max_freq across every cpufreq policy. hhd-z13 owns
+    all three, so two independent writers race the same sysfs files.
+
+    The frequency writer is worse than a race. It sets max = cpuinfo_max_freq,
+    so an hhd start while boost happens to be off re-bakes the nominal-clock
+    ceiling (the "3000 MHz that comes back" bug). And hhd_z13's PSTATE_SETTLE_S
+    gate does not restrain it -- that gates hhd_z13's own update(), not another
+    plugin -- so it can land mid-teardown while an amd_pstate mode switch is
+    still rebuilding the policies.
+
+    Two files, because the supports_* flags are NOT sufficient on their own:
+      drivers/gpu/__init__.py  supports_boost / supports_nonlinear /
+                               supports_epp -> False, which also removes the
+                               now-dead controls from the QAM via upstream's
+                               existing else-branches.
+      fuse/gpu.py              set_frequency_scaling() returns immediately.
+                               Three call sites in the balanced/performance/
+                               power arms are outside every supports_* guard,
+                               so flags alone leave them live the moment
+                               adjustor is taken off manual mode.
+
+    --check verifies each edit by its own sentinel and reports PARTIAL, not
+    PATCHED, when only some are present. That case is not hypothetical: boost
+    and epp were once applied by hand while supports_nonlinear was missed, and
+    a mark-only check showed green over a file still writing cpufreq.
+
 IDEMPOTENT + REVERSIBLE
     Safe to re-run (that is how the pacman hook uses it). Keeps a .z13-orig
-    backup of each file on first patch; --revert restores them.
+    backup of each file on first patch; --revert restores them. adjustor is
+    part of the hhd package, so the hook's `Target = hhd` covers it too.
 
     python3 hhd-qam-toggle-patch.py            # apply (idempotent)
     python3 hhd-qam-toggle-patch.py --check    # report state, change nothing
@@ -42,12 +72,35 @@ import os, shutil, sys, glob
 MARK = "z13-qam-toggle"
 MARK_VT = "z13-vt-gate"
 MARK_ONESHOT = "z13-oneshot"
+MARK_CPU = "z13-cpu-disable-native"
 
 
 def find_overlay_dir():
     hits = sorted(glob.glob("/usr/lib/python3*/site-packages/hhd/plugins/overlay"))
     if not hits:
         sys.exit("ERROR: hhd overlay package not found (is hhd installed?)")
+    return hits[-1]
+
+
+def find_adjustor_gpu():
+    """Locate adjustor's CPU/GPU driver.
+
+    adjustor ships alongside hhd but as its own top-level package, so this is
+    NOT under find_overlay_dir(). Returns a full file path, not a directory.
+    """
+    hits = sorted(
+        glob.glob("/usr/lib/python3*/site-packages/adjustor/drivers/gpu/__init__.py")
+    )
+    if not hits:
+        sys.exit("ERROR: adjustor gpu driver not found (is adjustor installed?)")
+    return hits[-1]
+
+
+def find_adjustor_fuse():
+    """Locate the module that actually writes cpufreq. Full file path."""
+    hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/fuse/gpu.py"))
+    if not hits:
+        sys.exit("ERROR: adjustor/fuse/gpu.py not found (is adjustor installed?)")
     return hits[-1]
 
 
@@ -387,7 +440,119 @@ def patch_base_oneshot(d):
     return True, "patched"
 
 
-def revert(d):
+# Independent edits, all carrying MARK_CPU. Each is guarded by its OWN
+# sentinel so a partially-applied file converges instead of reporting "already
+# patched" and skipping the rest -- which is exactly how this landed the first
+# time: boost and epp were done by hand and nonlinear was missed, leaving
+# adjustor still writing cpufreq behind a green check.
+#
+#   (label, anchor line, text appended after it, sentinel proving it applied)
+ADJUSTOR_GPU_PATCHES = (
+    (
+        "boost",
+        "        self.supports_boost = status.cpu_boost is not None\n",
+        """\
+        # {mark}: hhd-z13 owns CPU boost. adjustor's native path is not
+        # proven here -- every attempt logs "Failed to set CPU boost:" with
+        # no usable error. Forcing False also deletes cpu_boost from the QAM
+        # via the existing else-branch below, so the control does not appear
+        # at all rather than appearing and doing nothing.
+        self.supports_boost = False  # was: status.cpu_boost is not None
+""",
+        "self.supports_boost = False  # was:",
+    ),
+    (
+        "nonlinear",
+        "        self.supports_nonlinear = can_use_nonlinear()\n",
+        """\
+        # {mark}: the frequency floor/ceiling writer, and the dangerous one.
+        # Left enabled it writes scaling_min_freq and scaling_max_freq across
+        # every cpufreq policy on each apply:
+        #   AGPU INFO Setting CPU frequency scaling to [0.625 GHz, 3.000 GHz]
+        # Two problems. (a) adjustor is a separate plugin in the same hhd
+        # process, so hhd_z13's PSTATE_SETTLE_S gate does not apply to it --
+        # it can write mid-teardown while an amd_pstate mode switch is still
+        # rebuilding the policies. (b) it sets max = cpuinfo_max_freq, which
+        # re-bakes the nominal-clock ceiling on every hhd start whenever
+        # boost happens to be off at that moment.
+        self.supports_nonlinear = False  # was: can_use_nonlinear()
+""",
+        "self.supports_nonlinear = False  # was:",
+    ),
+    (
+        "epp",
+        "        self.supports_epp = status.epp_avail is not None\n",
+        """\
+        # {mark}: EPP writes DO work here, but hhd-z13 owns EPP now so that
+        # two independent writers do not race the same sysfs file.
+        self.supports_epp = False  # was: status.epp_avail is not None
+""",
+        "self.supports_epp = False  # was:",
+    ),
+)
+
+# The supports_* flags above are not sufficient on their own. Three call sites
+# in the balanced/performance/power preset arms call set_frequency_scaling()
+# OUTSIDE every supports_* guard, so they survive the flags being false and
+# would resume unguarded cpufreq writes the moment adjustor leaves manual mode.
+# Neuter the single definition instead, where no call site can miss it.
+ADJUSTOR_FUSE_PATCHES = (
+    (
+        "freq-writer",
+        "def set_frequency_scaling(nonlinear: bool):\n",
+        """\
+    # {mark}: hard stop. hhd-z13 owns scaling_min_freq/scaling_max_freq
+    # outright, and this function writes BOTH across every cpufreq policy
+    # (64 values over 32 policies here). It is reachable from preset arms
+    # that no supports_* flag gates, and adjustor is a separate plugin in
+    # the same hhd process, so hhd_z13's PSTATE_SETTLE_S gate does not hold
+    # it back -- it can land mid-teardown while an amd_pstate mode switch
+    # is still rebuilding the policies.
+    logger.debug("set_frequency_scaling: suppressed ({mark})")
+    return
+""",
+        "set_frequency_scaling: suppressed",
+    ),
+)
+
+
+def apply_marked(p, table):
+    """Apply a table of independently-sentinelled edits to one file."""
+    s = read(p)
+    applied, already = [], []
+    for label, anchor, repl, sentinel in table:
+        if sentinel in s:
+            already.append(label)
+            continue
+        if anchor not in s:
+            return None, f"anchor missing for {label} (adjustor internals changed)"
+        s = s.replace(anchor, anchor + repl.format(mark=MARK_CPU), 1)
+        applied.append(label)
+    if not applied:
+        return False, f"already patched ({', '.join(already)})"
+    write(p, s)
+    msg = "patched " + ", ".join(applied)
+    if already:
+        msg += f" (already: {', '.join(already)})"
+    return True, msg
+
+
+def marked_state(p, table):
+    """Report PATCHED / PARTIAL / unpatched for --check.
+
+    PARTIAL is called out loudly on purpose: a half-patched file still writes
+    cpufreq, and a mark-only check would have shown it as done.
+    """
+    s = read(p)
+    missing = [l for l, _, _, sen in table if sen not in s]
+    if not missing:
+        return "PATCHED"
+    if len(missing) == len(table):
+        return "unpatched"
+    return f"PARTIAL (missing: {', '.join(missing)})"
+
+
+def revert(d, adj):
     n = 0
     for fn in ("base.py", "__init__.py", "x11.py"):
         p = os.path.join(d, fn)
@@ -399,13 +564,30 @@ def revert(d):
             n += 1
         else:
             print(f"  no backup for {fn}")
-    for c in glob.glob(os.path.join(d, "__pycache__", "*.pyc")):
-        os.unlink(c)
+
+    # adjustor is a different package, so the loop above does not reach it
+    for a in adj:
+        rel = os.path.relpath(a, os.path.dirname(os.path.dirname(os.path.dirname(a))))
+        b = a + ".z13-orig"
+        if os.path.exists(b):
+            shutil.copy2(b, a)
+            os.unlink(b)
+            print(f"  reverted {rel}")
+            n += 1
+        else:
+            print(f"  no backup for {rel}")
+
+    for pkg in (d, *(os.path.dirname(a) for a in adj)):
+        for c in glob.glob(os.path.join(pkg, "__pycache__", "*.pyc")):
+            os.unlink(c)
     return n
 
 
 def main():
     d = find_overlay_dir()
+    a_gpu = find_adjustor_gpu()
+    a_fuse = find_adjustor_fuse()
+    adj = (a_gpu, a_fuse)
     mode = sys.argv[1] if len(sys.argv) > 1 else "--apply"
 
     if mode == "--check":
@@ -417,10 +599,18 @@ def main():
         ):
             s = read(os.path.join(d, fn))
             print(f"  {fn:14s} {label:12s} {'PATCHED' if mark in s else 'unpatched'}")
+        # Deliberately NOT a plain `MARK_CPU in s` test: the mark was present
+        # for boost and epp while supports_nonlinear was still live, i.e. a
+        # green check over a file that had not stopped writing cpufreq.
+        for disp, path, table in (
+            ("adjustor/gpu", a_gpu, ADJUSTOR_GPU_PATCHES),
+            ("adjustor/fuse", a_fuse, ADJUSTOR_FUSE_PATCHES),
+        ):
+            print(f"  {disp:14s} {'cpu-native':12s} {marked_state(path, table)}")
         return
 
     if mode == "--revert":
-        revert(d)
+        revert(d, adj)
         return
 
     if os.geteuid() != 0:
@@ -428,23 +618,28 @@ def main():
 
     for fn in ("base.py", "__init__.py", "x11.py"):
         backup(os.path.join(d, fn))
+    for a in adj:
+        backup(a)
 
     results = []
-    for name, fn in (
-        ("base.py/toggle", patch_base),
-        ("base.py/oneshot", patch_base_oneshot),
-        ("__init__.py", patch_init),
-        ("x11.py/vt-gate", patch_x11),
+    for name, fn, arg in (
+        ("base.py/toggle", patch_base, d),
+        ("base.py/oneshot", patch_base_oneshot, d),
+        ("__init__.py", patch_init, d),
+        ("x11.py/vt-gate", patch_x11, d),
+        ("adjustor/gpu", lambda p: apply_marked(p, ADJUSTOR_GPU_PATCHES), a_gpu),
+        ("adjustor/fuse", lambda p: apply_marked(p, ADJUSTOR_FUSE_PATCHES), a_fuse),
     ):
-        ok, msg = fn(d)
+        ok, msg = fn(arg)
         results.append((name, ok, msg))
         print(f"  {name:16s} {msg}")
         if ok is None:
             sys.exit(f"ERROR: {name}: {msg}. Not patching further; hhd left usable.")
 
     # drop stale bytecode so the edits take effect
-    for c in glob.glob(os.path.join(d, "__pycache__", "*.pyc")):
-        os.unlink(c)
+    for pkg in (d, *(os.path.dirname(a) for a in adj)):
+        for c in glob.glob(os.path.join(pkg, "__pycache__", "*.pyc")):
+            os.unlink(c)
     if any(ok for _, ok, _ in results):
         print("  -> restart hhd:  sudo systemctl restart hhd@$USER")
 
