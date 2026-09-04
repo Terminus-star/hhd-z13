@@ -322,34 +322,20 @@ def bridge_fps_limit(session, rate):
     return gamescope.set_fps_limit(session, display, limit)
 
 
-def _resolve_rate(setting, backend):
-    """Map the three-way control onto an actual rate to drive the panel to,
-    or None for "leave the panel alone".
+def _resolve_rate(mode, manual, backend):
+    """Map the Auto/Manual gate onto an actual refresh rate.
 
-    An explicit "60"/"180" is returned untouched: the user naming a rate
-    outranks the power source, so an AC transition must never override it.
-    "auto" resolves to the top rate on mains and the battery rate off it,
-    and gives up (None) in the two cases where guessing would be worse than
-    doing nothing:
-
-      * the power source cannot be read at all -- same call the CPU plugin's
-        boost control makes, same "leave it alone" answer it gives; and
-      * the backend is not kscreen, i.e. gamescope owns the foreground VT.
-        An explicit choice still reaches gamescope's own refresh control
-        (see set_rate), but a POLICY has no business flipping the panel
-        under a running game because a charger moved -- and gamescope's
-        vblank cannot follow a mid-session refresh change anyway (see
-        bridge_fps_limit).
-    """
-    if setting in RATES:
-        return setting
+    Manual is authoritative. Auto follows the power source. Returns None --
+    meaning leave the panel alone -- when the backend is not kscreen (nothing
+    reachable there) or the power source cannot be determined."""
     if backend != "kscreen":
         return None
+    if mode == "manual":
+        return str(manual) if str(manual) in RATES else None
     ac = _on_ac()
     if ac is None:
         return None
     return TOP_RATE if ac else BATTERY_RATE
-
 
 def _run_as_user(session, args, timeout=KSCREEN_TIMEOUT_S):
     """subprocess.run dropped to the desktop session's uid/gid, mirroring
@@ -548,8 +534,11 @@ class Z13DisplayPlugin(HHDPlugin):
         # the target WITHOUT the setting itself changing -- which is the whole
         # point of the option, and the reason the comparison below is against
         # the resolved rate rather than the config value.
-        rate_setting = conf["z13_display.root.status.available.refresh_rate"].to(str)
-        new_rate = _resolve_rate(rate_setting, backend)
+        rate_mode = conf["z13_display.root.status.available.refresh_rate.mode"].to(str)
+        rate_manual = conf[
+            "z13_display.root.status.available.refresh_rate.manual.rate"
+        ].to(str)
+        new_rate = _resolve_rate(rate_mode, rate_manual, backend)
 
         if self.old_rate is None:
             # First tick after becoming available: ADOPT, never apply. Even in
@@ -562,8 +551,10 @@ class Z13DisplayPlugin(HHDPlugin):
                 # Only ever write a rate back into an EXPLICIT setting. Doing
                 # it under "auto" would silently demote the user's policy to
                 # whatever the panel happened to be showing at startup.
-                if rate_setting != "auto":
-                    conf["z13_display.root.status.available.refresh_rate"] = live
+                if rate_mode == "manual":
+                    conf[
+                        "z13_display.root.status.available.refresh_rate.manual.rate"
+                    ] = live
             return
 
         if new_rate is not None and new_rate != self.old_rate:
@@ -590,11 +581,13 @@ class Z13DisplayPlugin(HHDPlugin):
         # rate every 15s would mean fighting KDE's own display settings for
         # anyone who deliberately changed the rate mid-session. Auto stays
         # quiet until the charger actually moves.
-        if rate_setting != "auto":
+        if rate_mode == "manual":
             live = read_rate(session, backend, display)
             if live is not None and live != self.old_rate:
                 self.old_rate = live
-                conf["z13_display.root.status.available.refresh_rate"] = live
+                conf[
+                    "z13_display.root.status.available.refresh_rate.manual.rate"
+                ] = live
                 # Someone changed the rate outside hhd (KDE display settings, a
                 # script). The bridge applies the same either way.
                 if backend == "kscreen":

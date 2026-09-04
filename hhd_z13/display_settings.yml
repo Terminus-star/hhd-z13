@@ -20,19 +20,10 @@ z13_display:
           type: container
           children:
             refresh_rate:
-              type: multiple
+              type: mode
               title: Refresh Rate
               tags: [dropdown]
               default: auto
-              options:
-                # Every key here MUST stay quoted. YAML 1.1 parses a bare
-                # 60/180 as an INTEGER and a bare on/off/yes/no as a
-                # BOOLEAN, either of which would make the option key a
-                # non-string and break the string comparisons in
-                # display.py (RATES, `rate_setting != "auto"`).
-                auto: Auto (180 Hz on AC, 60 Hz on battery)
-                "60": 60 Hz
-                "180": 180 Hz
               hint: >-
                 Switches the internal panel (eDP-1) only -- an external
                 display, if connected, is left alone. Applied immediately;
@@ -53,6 +44,27 @@ z13_display:
                 going back to 180 lifts the cap. gamescope's own refresh
                 cannot be changed after it starts, so capping the game is
                 what stops it rendering above what the panel is showing.
+              modes:
+                auto:
+                  type: container
+                  title: Auto (180 Hz on AC, 60 Hz on battery)
+                manual:
+                  type: container
+                  title: Manual
+                  children:
+                    rate:
+                      type: multiple
+                      title: Rate
+                      tags: [ordinal]
+                      default: "180"
+                      options:
+                        # Quoted deliberately: YAML 1.1 turns a bare 60/180 into an int,
+                        # which breaks the string comparisons in display.py.
+                        "60": 60 Hz
+                        "180": 180 Hz
+                      hint: >-
+                        A fixed rate, ignoring the power source. Only shown while the mode
+                        above is Manual.
             vrr:
               type: multiple
               title: Adaptive Sync

@@ -102,17 +102,10 @@ z13_cpu:
                 userspace is deliberately not offered: it hands control to a
                 scaling_setspeed nobody writes, so it does nothing.
     boost:
-      type: multiple
+      type: mode
       title: CPU Boost
       tags: [dropdown]
       default: auto
-      options:
-        # "on"/"off" MUST stay quoted: YAML 1.1 parses them as booleans,
-        # which turns the option keys into True/False and breaks the
-        # string comparisons in plugin.py.
-        auto: Auto (on AC, off on battery)
-        "on": Always on
-        "off": Always off
       hint: >-
         Opportunistic clocks above the base frequency. Auto follows the power
         source, which is the useful default: the bursts are worth the watts
@@ -127,6 +120,21 @@ z13_cpu:
         boot no matter what is toggled afterwards. hhd runs well after the
         kernel builds those policies, so this setting cannot cause that -- but
         a boot-time boost=0 elsewhere would.
+      modes:
+        auto:
+          type: container
+          title: Auto (on AC, off on battery)
+        manual:
+          type: container
+          title: Manual
+          children:
+            enabled:
+              type: bool
+              title: Boost Enabled
+              default: True
+              hint: >-
+                On or off explicitly, ignoring the power source. Only shown while
+                the mode above is Manual.
     perf_mode:
       type: bool
       title: CPU Perf Mode

@@ -92,15 +92,16 @@ def _on_ac() -> bool | None:
     return None
 
 
-def _resolve_boost(setting: str) -> bool | None:
-    """Map the three-way control onto an actual boost state."""
-    if setting == "on":
-        return True
-    if setting == "off":
-        return False
+def _resolve_boost(mode: str, manual: bool) -> bool | None:
+    """Map the Auto/Manual gate onto an actual boost state.
+
+    Manual is authoritative -- an explicit choice is never overridden by the
+    charger. Auto follows the power source, and returns None when that cannot
+    be read, which callers treat as "leave it alone" rather than guessing."""
+    if mode == "manual":
+        return bool(manual)
     ac = _on_ac()
     return None if ac is None else ac
-
 
 def _pstate_mode() -> str:
     try:
@@ -408,8 +409,9 @@ class Z13CpuPlugin(HHDPlugin):
         # Resolved, not raw: in "auto" this follows the power source, so an
         # AC transition changes the target without the setting changing. The
         # comparison below is against the resolved value for that reason.
-        boost_setting = conf["z13_cpu.root.boost"].to(str)
-        new_boost = _resolve_boost(boost_setting)
+        boost_mode = conf["z13_cpu.root.boost.mode"].to(str)
+        boost_manual = conf["z13_cpu.root.boost.manual.enabled"].to(bool)
+        new_boost = _resolve_boost(boost_mode, boost_manual)
         new_freq_mode = conf["z13_cpu.root.freq_mode.mode"].to(str)
         new_min_freq = conf["z13_cpu.root.freq_mode.manual.min_freq"].to(int)
         new_max_freq = conf["z13_cpu.root.freq_mode.manual.max_freq"].to(int)
@@ -580,12 +582,14 @@ class Z13CpuPlugin(HHDPlugin):
         # Only reconcile an explicit choice. Under "auto" the power source is
         # the authority, so pulling a live reading back into the config would
         # overwrite the user's policy with a momentary state.
-        if "boost" in live and boost_setting in ("on", "off"):
+        # Only reconcile an explicit choice. Under Auto the power source is the
+        # authority, so pulling a live reading back into the config would
+        # overwrite the policy with a momentary state.
+        if "boost" in live and boost_mode == "manual":
             live_boost = bool(live["boost"])
-            want = boost_setting == "on"
-            if live_boost != want:
+            if live_boost != boost_manual:
                 self.old_boost = live_boost
-                conf["z13_cpu.root.boost"] = "on" if live_boost else "off"
+                conf["z13_cpu.root.boost.manual.enabled"] = live_boost
 
         # Gated the same as the write side above: outside "manual" the
         # sliders are hidden, so there is nothing useful to reconcile them
