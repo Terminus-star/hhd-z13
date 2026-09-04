@@ -45,12 +45,15 @@ SYNC WITH z13ctl-plus's OWN AUTOMATIC PRESET SWITCHING
 """
 import glob
 import json
+import logging
 import os
 import subprocess
 import time
 
 from hhd.plugins import HHDPlugin, load_relative_yaml
 from hhd.plugins.conf import Config
+
+logger = logging.getLogger(__name__)
 
 Z13CTL = "z13ctl-plus"
 TIMEOUT_S = 10
@@ -331,6 +334,43 @@ def _ensure_boost_for(max_mhz: int) -> None:
     _write_boost(True)
 
 
+def _reexpand_ceiling() -> None:
+    """The reverse of _ensure_boost_for(): boost has just been turned ON, so
+    re-open scaling_max_freq to the ceiling that boost made available.
+
+    _ensure_boost_for() only covers "the user asked for a ceiling above
+    nominal, so enable boost first". Nothing covered the other direction, and
+    the kernel does not do it for us: enabling boost raises cpuinfo_max_freq
+    (3000000 -> 5187500 here) but leaves every existing policy's
+    scaling_max_freq exactly where it was. A policy built while boost was off
+    therefore keeps the nominal ceiling forever.
+
+    That is the "3000 MHz comes back" bug in its last hiding place. The path
+    is: battery (Auto turns boost off, policies clamp to nominal) -> plug in
+    AC (Auto turns boost on, cpuinfo_max_freq rises) -> ceiling stays at
+    3000000, i.e. 58% of the hardware, silently, with nothing logged.
+
+    Only widens, never narrows: if scaling_max_freq is already at or above
+    cpuinfo_max_freq there is nothing to do, so a deliberately lower manual
+    ceiling set through freq_mode is left alone.
+    """
+    try:
+        hi = _read_leaf("cpuinfo_max_freq")
+        cur = _read_leaf("scaling_max_freq")
+        if not hi or not cur:
+            return
+        hi_i, cur_i = int(hi), int(cur)
+        if cur_i >= hi_i:
+            return
+        if _write_all("scaling_max_freq", str(hi_i)):
+            logger.info(
+                f"Re-expanded CPU ceiling {cur_i // 1000} -> {hi_i // 1000} MHz "
+                "after boost was enabled"
+            )
+    except Exception as e:
+        logger.warning(f"Could not re-expand the CPU ceiling: {e}")
+
+
 def _apply_freq(min_mhz: int | None, max_mhz: int | None) -> bool:
     """Ceiling before floor when both move -- raising the floor first can be
     rejected against a lower ceiling. z13ctl-plus does this ordering itself;
@@ -527,6 +567,15 @@ class Z13CpuPlugin(HHDPlugin):
         if boost_changed_by_user:
             self.old_boost = new_boost
             _apply_boost(new_boost)
+
+        # Deliberately NOT gated on boost_changed_by_user. A policy built while
+        # boost was off keeps the nominal ceiling, and that state outlives the
+        # transition that caused it -- a resume, or an hhd restart, leaves the
+        # machine stuck at 3000 MHz with boost already reading 1, so a
+        # change-gated fix would never fire. Idempotent and cheap: two reads,
+        # and it only writes when the ceiling is genuinely below the hardware.
+        if new_boost:
+            _reexpand_ceiling()
 
         # min_freq/max_freq are GATED by freq_mode: outside "manual" they are
         # hidden in the QAM and must never be applied to hardware -- Auto
