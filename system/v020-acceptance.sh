@@ -121,14 +121,28 @@ done
 grep -qE "^HOOKS=.*\bsd-encrypt\b" /etc/mkinitcpio.conf 2>/dev/null \
   && p "critical HOOKS intact" "systemd, sd-encrypt, resume, filesystems"
 
-# images must be newer than the config that produced them
+# The LIVE images must be newer than the config that produced them.
+#
+# limine_history/ is excluded on purpose. It holds rollback copies for older
+# snapper snapshots, which are SUPPOSED to predate the current config -- that
+# is what they are for. Globbing initramfs* across the whole tree counted every
+# retained rollback as a stale boot image, so the check failed harder the more
+# history you kept and no amount of `limine-update` could ever clear it.
+#
+# Only /boot/<machine-id>/<kernel-name>/initramfs is a live image.
 MID=$(cat /etc/machine-id 2>/dev/null)
 if [ -r "/boot/$MID" ]; then
-  STALE=$(find "/boot/$MID" -name 'initramfs*' -not -newer /etc/mkinitcpio.conf 2>/dev/null | wc -l)
-  N=$(find "/boot/$MID" -name 'initramfs*' 2>/dev/null | wc -l)
+  STALE=$(find "/boot/$MID" -mindepth 2 -maxdepth 2 -name 'initramfs*' \
+            -not -path '*/limine_history/*' -not -newer /etc/mkinitcpio.conf 2>/dev/null | wc -l)
+  N=$(find "/boot/$MID" -mindepth 2 -maxdepth 2 -name 'initramfs*' \
+        -not -path '*/limine_history/*' 2>/dev/null | wc -l)
+  HIST=$(find "/boot/$MID/limine_history" -name 'initramfs*' 2>/dev/null | wc -l)
   if [ "$N" = 0 ]; then w "initramfs images" "none found under /boot/$MID"
-  elif [ "$STALE" = 0 ]; then p "initramfs freshness" "$N image(s), all newer than mkinitcpio.conf"
-  else f "initramfs freshness" "$STALE of $N older than mkinitcpio.conf — run sudo limine-update"; fi
+  elif [ "$STALE" = 0 ]; then
+    p "initramfs freshness" "$N live image(s) newer than mkinitcpio.conf (+$HIST rollback, ignored)"
+  else
+    f "initramfs freshness" "$STALE of $N LIVE images older than mkinitcpio.conf — run sudo limine-update"
+  fi
 else s "initramfs freshness" "/boot not readable (run with sudo to check)"; fi
 
 # ─────────────────────────────────────────────── 4. journal health
