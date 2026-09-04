@@ -353,6 +353,19 @@ def _run_as_user(session, args, timeout=KSCREEN_TIMEOUT_S):
         "XDG_RUNTIME_DIR": runtime_dir,
         "XDG_SESSION_TYPE": "wayland",
         "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        # Without a UTF-8 locale Qt prints a four-line "Detected locale \"C\"
+        # ... switched to C.UTF-8" warning on EVERY kscreen-doctor call. This
+        # env is minimal by design, so the children inherited plain "C" and
+        # those four lines became ~95% of hhd's journal -- 1768 of 1858 lines
+        # in one session -- rotating the real evidence out of retention. That
+        # is not cosmetic: it is why the overlay-failure history went missing.
+        #
+        # C.UTF-8 rather than the user's locale on purpose: it keeps C's
+        # collation and number formatting, so `kscreen-doctor -j` output stays
+        # byte-predictable for the parsers below (no locale-dependent decimal
+        # separator), and only the encoding changes.
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
     }
     try:
         return subprocess.run(
