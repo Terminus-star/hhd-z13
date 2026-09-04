@@ -88,12 +88,13 @@ if [ "$MODE" = "--revert" ]; then
            /etc/systemd/system/z13-gpu-compute-affinity.timer.d/99-z13-interval.conf; do
     [ -e "$f" ] && rm -f "$f" && did "removed $f"
   done
-  if user_systemctl is-enabled virtual-surround-sound.service >/dev/null 2>&1; then
-    skip "virtual-surround-sound already enabled"
-  else
-    user_systemctl unmask virtual-surround-sound.service >/dev/null 2>&1 && \
-      did "unmasked virtual-surround-sound (still disabled; enable it yourself if you want it back)"
-  fi
+  # put the surround-sound unit back if we moved it aside, and clear any mask
+  # an earlier version of this script may have left behind
+  restore "/home/$TARGET_USER/.config/systemd/user/virtual-surround-sound.service"
+  user_systemctl unmask virtual-surround-sound.service >/dev/null 2>&1 || true
+  user_systemctl daemon-reload >/dev/null 2>&1 || true
+  say "(virtual-surround-sound is restored but left DISABLED -- enable it"
+  say " yourself if you reinstall the Decky plugin)"
   systemctl daemon-reload
   systemctl restart systemd-journald
   say ""
@@ -121,8 +122,19 @@ if [ "$DO_SURROUND" = 1 ]; then
     say "ignores them -- so the rate limiter never trips and it respawns forever."
     act "stop virtual-surround-sound"    user_systemctl stop    virtual-surround-sound.service
     act "disable virtual-surround-sound" user_systemctl disable virtual-surround-sound.service
-    act "mask virtual-surround-sound"    user_systemctl mask    virtual-surround-sound.service
-    say "(the unit file itself is left on disk; --revert unmasks it)"
+    # NOT `systemctl --user mask`: that wants to drop a /dev/null symlink into
+    # ~/.config/systemd/user/, which is exactly where the real unit already
+    # lives and which outranks every other unit directory. The mask silently
+    # fails and is-enabled keeps reporting "disabled". Move the file aside
+    # instead -- that genuinely cannot be re-enabled by accident, and --revert
+    # puts it back.
+    if [ "$MODE" = "--apply" ]; then
+      backup "$UNIT"
+      rm -f "$UNIT" && did "moved the unit aside (backup at ${UNIT}${BAK})"
+      user_systemctl daemon-reload && did "user daemon-reload"
+    else
+      would "move $UNIT aside (backed up, restored by --revert)"
+    fi
   fi
 fi
 
@@ -188,7 +200,14 @@ if [ "$DO_AFFINITY" = 1 ]; then
       cat > "$F" <<EOF
 # z13 v0.2.0: 3s was pointlessly aggressive for a process-affinity sweep and
 # dominated the system journal. Drop-in so the packaged unit stays untouched.
+#
+# The empty OnUnitActiveSec= is REQUIRED and is not a typo. systemd's timer
+# On*Sec= directives are LIST-ACCUMULATING, not scalar: a drop-in that just
+# sets a new value ADDS a second trigger rather than replacing the first, so
+# the unit ends up firing at 3s AND 30s and nothing improves. An empty
+# assignment resets the list; the following line then sets the only value.
 [Timer]
+OnUnitActiveSec=
 OnUnitActiveSec=${AFFINITY_SEC}s
 AccuracySec=5s
 EOF
@@ -305,28 +324,32 @@ if [ "$DO_MKINITCPIO" = 1 ]; then
       echo "  presets, so there is no safe way to rebuild here. Restoring."
       cp -a "$M$BAK" "$M"; exit 1
     fi
-    UKI_DIR=$(/bin/ls -d /boot/EFI/Linux 2>/dev/null || true)
-    BEFORE=$(find "${UKI_DIR:-/nonexistent}" -name '*.efi' -newermt '-1 second' 2>/dev/null | wc -l)
-    say "rebuilding UKIs with limine-update (4 kernels installed)..."
+    # Verify by MODIFICATION TIME under the machine-id boot dir, not by guessing
+    # a filename layout. limine writes to $ESP_PATH/$MACHINE_ID/$KERNEL_NAME/,
+    # and whether those are UKIs or plain initramfs depends on ENABLE_UKI in
+    # /etc/default/limine (it is 'no' here, so: plain initramfs). Checking "did
+    # files just get rewritten" is true for both and cannot drift.
+    MID=$(cat /etc/machine-id 2>/dev/null)
+    BOOTDIR="/boot/${MID}"
+    if [ -z "$MID" ] || [ ! -d "$BOOTDIR" ]; then
+      echo "  ERROR: cannot find $BOOTDIR to verify against. Restoring."
+      cp -a "$M$BAK" "$M"; exit 1
+    fi
+    STAMP=$(mktemp); : > "$STAMP"   # reference mtime = now
+    say "rebuilding with limine-update (kernels: $(/bin/ls /usr/lib/modules | tr '\n' ' '))"
     if limine-update; then
       did "limine-update succeeded"
-      OK=1; N=0
-      for uki in "${UKI_DIR:-/nonexistent}"/*.efi; do
-        [ -e "$uki" ] || continue
-        N=$((N+1))
-        SZ=$(stat -c %s "$uki")
-        if [ "$SZ" -lt 4000000 ]; then
-          echo "  ERROR: $(basename "$uki") is only $SZ bytes"; OK=0
-        else
-          say "  ok $(basename "$uki")  $(numfmt --to=iec "$SZ")"
-        fi
-      done
-      [ "$N" -gt 0 ] || { echo "  ERROR: no UKIs found in ${UKI_DIR:-<unset>}"; OK=0; }
-      if [ "$OK" != 1 ]; then
-        echo "  ERROR: UKI verification failed. Restoring and rebuilding."
+      # every image file under the machine-id dir that limine just rewrote
+      REBUILT=$(find "$BOOTDIR" -type f -newer "$STAMP" -size +4M 2>/dev/null | wc -l)
+      rm -f "$STAMP"
+      if [ "$REBUILT" -lt 1 ]; then
+        echo "  ERROR: limine-update exited 0 but rewrote no images >4M under"
+        echo "  $BOOTDIR -- refusing to trust that. Restoring and rebuilding."
         cp -a "$M$BAK" "$M"; limine-update; exit 1
       fi
-      did "$N UKI(s) rebuilt and non-trivial"
+      did "$REBUILT boot image(s) rewritten under $BOOTDIR"
+      find "$BOOTDIR" -type f -size +4M -printf '    %s  %p\n' 2>/dev/null \
+        | sort -k2 | head -8 | while read -r l; do say "$l"; done
       say ""
       say "amdgpu is compiled as a module and is pulled in by the kms hook as"
       say "well as MODULES=, so it is present either way -- the point of the"
