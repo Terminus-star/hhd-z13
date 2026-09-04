@@ -75,10 +75,24 @@ external controllers by construction, not by misconfiguration.
   in via `Asus WMI hotkeys`, a device Steam has no interest in grabbing.
   Confirmed firing (`Gesture: custom_armoury` -> `Executing overlay command:
   'open_qam'`).
-- **Keyboard chords** work too, but only under gamescope: `kbd_` gestures are
-  gated on `is_gamescope_running()` (`__init__.py:311`) because KDE/GNOME would
-  otherwise swallow them. `meta_hold` is currently bound to `steam_qam`; it
-  could be pointed at `hhd_qam` instead.
+- **`Ctrl+4` (QAM) and `Ctrl+3` (expanded).** These are hhd's *defaults* —
+  `shortcuts.yml` has `ctrl_4: hhd_qam` and `ctrl_3: hhd_expanded`, and
+  `state.yml` leaves both at `default`, so they have been live all along.
+  **Confirmed working.** They arrive from `GZ302EA-Keyboard`, a device Steam
+  has no reason to grab, so they are immune to the `EVIOCGRAB` problem that
+  kills the controller chords.
+
+  They were easy to miss: `kbd_ctrl_3` and `kbd_ctrl_4` had each fired **zero**
+  times in the whole journal — not broken, just never pressed.
+
+  Like all `kbd_` gestures they are gated on `is_gamescope_running()`
+  (`__init__.py:311`), because KDE/GNOME would otherwise swallow them, so they
+  work in game mode only.
+
+**Deliberately not changed:** `meta_press`/`meta_hold` stay on
+`steam_expanded`/`steam_qam`. Repointing `meta_hold` at `hhd_qam` would work,
+but `Ctrl+4` already covers the QAM, and rebinding would cost the only quick
+route to Steam's own QAM for no gain.
 
 ## Could hhd own an external pad the way it owns a handheld's?
 
