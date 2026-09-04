@@ -9,51 +9,128 @@ z13_cpu:
     hhd-patches/hhd-qam-toggle-patch.py's z13-cpu-disable-native patch, which
     removes hhd's own controls so the two do not race the same sysfs files.
   children:
-    epp:
-      type: multiple
-      title: CPU Power (EPP)
-      tags: [ordinal]
-      default: balance_power
-      options:
-        power: Low
-        balance_power: Balanced
-        balance_performance: High
-        performance: Max
+    pstate:
+      type: mode
+      title: amd_pstate Mode
+      tags: [dropdown]
+      default: guided
       hint: >-
-        Energy Performance Preference -- a per-core HINT to the CPU's own
-        firmware governor about how aggressively to chase frequency, not a
-        frequency setter itself. Reach for this for everyday, ongoing bias:
-        "Low" for a quiet lap on battery, "Balanced" for general use, "High"
-        or "Max" when you want the CPU to ramp up faster under load and are
-        willing to trade battery/heat for it. It takes effect immediately and
-        stays until you change it again or a z13ctl-plus preset overrides it
-        on an AC/battery transition. Includes the full "Max" (performance)
-        value, which hhd's own equivalent control deliberately excludes.
-        Setting this also pins scaling_governor=powersave in the background
-        (best-effort): the alternative governor, "performance", locks EPP to
-        a fixed value and makes it unwritable, so this control silently stops
-        working under that governor unless something re-pins it first.
+        Which layer decides the CPU's operating point -- and which control
+        appears below, since the modes do not expose the same knobs. Active
+        hands selection to the firmware and gives you EPP. Guided and Passive
+        replace EPP with the cpufreq governor, because the
+        energy_performance_preference file does not exist outside Active.
+        The kernel resets this to the amd_pstate= boot argument on every
+        reboot, so setting it here is what makes a choice stick: hhd
+        re-applies its own state at startup, with no bootloader edit.
+        Changing it tears down and rebuilds every cpufreq policy, so nothing
+        else is written in the same tick and the switch is allowed to settle
+        before anything below is touched again.
+      modes:
+        active:
+          type: container
+          title: Active (EPP)
+          children:
+            epp:
+              type: multiple
+              title: CPU Power (EPP)
+              tags: [ordinal]
+              default: balance_power
+              options:
+                power: Low
+                balance_power: Balanced
+                balance_performance: High
+                performance: Max
+              hint: >-
+                Energy Performance Preference -- a per-core HINT to the CPU's own
+                firmware governor about how aggressively to chase frequency, not a
+                frequency setter itself. Reach for this for everyday, ongoing bias:
+                "Low" for a quiet lap on battery, "Balanced" for general use, "High"
+                or "Max" when you want the CPU to ramp up faster under load and are
+                willing to trade battery/heat for it. It takes effect immediately and
+                stays until you change it again or a z13ctl-plus preset overrides it
+                on an AC/battery transition. Includes the full "Max" (performance)
+                value, which hhd's own equivalent control deliberately excludes.
+                Setting this also pins scaling_governor=powersave in the background
+                (best-effort): the alternative governor, "performance", locks EPP to
+                a fixed value and makes it unwritable, so this control silently stops
+                working under that governor unless something re-pins it first.
+        guided:
+          type: container
+          title: Guided
+          children:
+            governor:
+              type: multiple
+              title: CPU Governor
+              tags: [dropdown]
+              default: schedutil
+              options:
+                schedutil: schedutil
+                performance: performance
+                powersave: powersave
+                ondemand: ondemand
+                conservative: conservative
+              hint: >-
+                Which governor drives the operating point. schedutil follows the
+                scheduler's own utilisation signal and is the right default;
+                performance pins every core to the ceiling. powersave here means the
+                MINIMUM frequency -- the opposite of what that word means in Active
+                mode, where it is the ordinary governor and EPP does the biasing.
+                userspace is deliberately not offered: it hands control to a
+                scaling_setspeed nobody writes, so it does nothing.
+        passive:
+          type: container
+          title: Passive
+          children:
+            governor:
+              type: multiple
+              title: CPU Governor
+              tags: [dropdown]
+              default: schedutil
+              options:
+                schedutil: schedutil
+                performance: performance
+                powersave: powersave
+                ondemand: ondemand
+                conservative: conservative
+              hint: >-
+                Which governor drives the operating point. schedutil follows the
+                scheduler's own utilisation signal and is the right default;
+                performance pins every core to the ceiling. powersave here means the
+                MINIMUM frequency -- the opposite of what that word means in Active
+                mode, where it is the ordinary governor and EPP does the biasing.
+                userspace is deliberately not offered: it hands control to a
+                scaling_setspeed nobody writes, so it does nothing.
     boost:
       type: multiple
       title: CPU Boost
-      tags: [ordinal]
-      default: enabled
+      tags: [dropdown]
+      default: auto
       options:
-        enabled: Enabled
-        disabled: Disabled
+        # "on"/"off" MUST stay quoted: YAML 1.1 parses them as booleans,
+        # which turns the option keys into True/False and breaks the
+        # string comparisons in plugin.py.
+        auto: Auto (on AC, off on battery)
+        "on": Always on
+        "off": Always off
       hint: >-
-        Enables or disables CPU boost (opportunistic clocks above the base
-        frequency for short bursts). Leave enabled for normal use; disable
-        only if you specifically want to cap peak clocks for heat/battery
-        reasons independent of EPP.
+        Opportunistic clocks above the base frequency. Auto follows the power
+        source, which is the useful default: the bursts are worth the watts
+        plugged in and rarely worth them on battery.
+        Boost also gates the Frequency Ceiling, because with it off the kernel
+        reports the nominal clock as the hardware maximum -- 3000 MHz here
+        against 5187 -- and clamps the ceiling to it. That is reversible:
+        turning boost back on restores the ceiling by itself.
+        The one case that is NOT reversible is boost being off at BOOT. A
+        cpufreq policy's maximum is fixed when the policy is created, so if
+        boost is off then, the ceiling is stuck at nominal for the life of the
+        boot no matter what is toggled afterwards. hhd runs well after the
+        kernel builds those policies, so this setting cannot cause that -- but
+        a boot-time boost=0 elsewhere would.
     perf_mode:
-      type: multiple
+      type: bool
       title: CPU Perf Mode
-      tags: [ordinal]
-      default: disabled
-      options:
-        disabled: Disabled
-        enabled: Enabled
+      default: False
       hint: >-
         A one-tap PRESET, not an independent setting: flips EPP=Max, raises
         the frequency floor, and turns boost on, all in one step -- for

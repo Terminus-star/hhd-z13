@@ -43,7 +43,9 @@ SYNC WITH z13ctl-plus's OWN AUTOMATIC PRESET SWITCHING
     perf_mode's displayed state can go stale if an automatic preset switch
     happens while it reads Enabled; EPP/Boost stay correct regardless.
 """
+import glob
 import json
+import os
 import subprocess
 import time
 
@@ -52,6 +54,136 @@ from hhd.plugins.conf import Config
 
 Z13CTL = "z13ctl-plus"
 TIMEOUT_S = 10
+
+# amd_pstate has three modes and they do not expose the same knobs.
+#
+#   active  -> driver amd-pstate-epp. EPP is the knob; the governor is nearly
+#              vestigial (only powersave/performance exist). Measured on this
+#              machine: scaling_max_freq is clamped to the nominal 3000 MHz and
+#              refuses anything higher, so the ceiling is not really settable.
+#   guided  -> driver amd-pstate. Firmware picks within OS-set limits.
+#   passive -> driver amd-pstate. The kernel governor drives perf directly.
+#
+# In guided and passive the energy_performance_preference file DOES NOT EXIST,
+# and z13ctl-plus fails on every `cpu` subcommand because its read path starts
+# by reading EPP -- so the whole plugin, not just the EPP slider, goes dead if
+# it keeps shelling out. Outside active mode this drives sysfs directly, which
+# hhd can do because it runs as root, and offers the cpufreq governor in EPP's
+# place. Both modes also expose the full 5187 MHz range rather than 3000.
+#
+# EPP presence, not the mode string, is the functional test: it is what decides
+# which knobs exist. The mode string is only used for labelling.
+PSTATE_STATUS = "/sys/devices/system/cpu/amd_pstate/status"
+BOOST_PATH = "/sys/devices/system/cpu/cpufreq/boost"
+CPU0 = "/sys/devices/system/cpu/cpu0/cpufreq"
+EPP_LEAF = "energy_performance_preference"
+
+
+def _on_ac() -> bool | None:
+    """True on mains, False on battery, None if it cannot be determined --
+    which callers treat as "leave boost alone" rather than guessing."""
+    import glob as _g
+    for f in _g.glob("/sys/class/power_supply/A*/online"):
+        try:
+            with open(f) as fh:
+                return fh.read().strip() == "1"
+        except Exception:
+            continue
+    return None
+
+
+def _resolve_boost(setting: str) -> bool | None:
+    """Map the three-way control onto an actual boost state."""
+    if setting == "on":
+        return True
+    if setting == "off":
+        return False
+    ac = _on_ac()
+    return None if ac is None else ac
+
+
+def _pstate_mode() -> str:
+    try:
+        with open(PSTATE_STATUS) as f:
+            return f.read().strip()
+    except Exception:
+        return "unknown"
+
+
+def _has_epp() -> bool:
+    return os.path.exists(os.path.join(CPU0, EPP_LEAF))
+
+
+def _read_leaf(leaf: str) -> str | None:
+    try:
+        with open(os.path.join(CPU0, leaf)) as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def _write_all(leaf: str, value: str) -> bool:
+    """Write a cpufreq leaf on every policy. True if at least one took."""
+    n = 0
+    for d in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/cpufreq"):
+        try:
+            with open(os.path.join(d, leaf), "w") as f:
+                f.write(str(value))
+            n += 1
+        except Exception:
+            continue
+    return n > 0
+
+
+def _write_boost(on: bool) -> bool:
+    try:
+        with open(BOOST_PATH, "w") as f:
+            f.write("1" if on else "0")
+        return True
+    except Exception:
+        return False
+
+
+# 'userspace' is offered by the driver but is a trap in a QAM: selecting it
+# hands control to a scaling_setspeed nobody writes, so the CPU simply stays
+# wherever it was and the control appears to do nothing.
+GOVERNOR_HIDE = ("userspace",)
+
+
+def _governors() -> list[str]:
+    v = _read_leaf("scaling_available_governors")
+    if not v:
+        return []
+    return [g for g in v.split() if g not in GOVERNOR_HIDE]
+
+
+def _get_live_sysfs() -> dict | None:
+    """The same shape _get_live() returns, read straight from sysfs, for the
+    modes where z13ctl-plus cannot read anything at all."""
+    try:
+        mn = _read_leaf("scaling_min_freq")
+        mx = _read_leaf("scaling_max_freq")
+        lo = _read_leaf("cpuinfo_min_freq")
+        hi = _read_leaf("cpuinfo_max_freq")
+        if None in (mn, mx, lo, hi):
+            return None
+        boost = _read_leaf("../../cpufreq/boost")
+        if boost is None:
+            try:
+                with open(BOOST_PATH) as f:
+                    boost = f.read().strip()
+            except Exception:
+                boost = None
+        return {
+            "min_frequency_khz": int(mn),
+            "max_frequency_khz": int(mx),
+            "min_limit_khz": int(lo),
+            "max_limit_khz": int(hi),
+            "governor": _read_leaf("scaling_governor"),
+            "boost": boost == "1",
+        }
+    except Exception:
+        return None
 RECONCILE_INTERVAL_S = 2.0
 
 
@@ -71,10 +203,15 @@ def _run(*args) -> bool:
 
 
 def _get_live() -> dict | None:
-    """Read live CPU power state via `cpu --get --json`. None on any
+    """Live CPU power state. Outside active mode z13ctl-plus cannot read
+    anything at all -- its read path begins with EPP, which does not exist --
+    so this falls back to sysfs rather than returning None forever and leaving
+    every slider frozen. None on any
     failure -- a read-back that cannot complete must not disturb anything
     already applied, so callers treat None as "skip reconciliation this
     tick", never as a value to act on."""
+    if not _has_epp():
+        return _get_live_sysfs()
     try:
         r = subprocess.run(
             [Z13CTL, "cpu", "--get", "--json"],
@@ -88,6 +225,133 @@ def _get_live() -> dict | None:
         return None
 
 
+PERF_FLOOR_MHZ = 2000
+
+
+def _apply_perf(plugin, enable: bool) -> bool:
+    """z13ctl-plus's --perf/--save in active mode; the same idea in sysfs
+    otherwise -- performance governor, a raised floor so there is nothing to
+    ramp from, and boost on. The displaced values are snapshotted on the way
+    IN only, so repeating --perf never overwrites the originals with perf's
+    own, and --save restores what was actually there rather than a guess."""
+    if _has_epp():
+        return _run("--perf" if enable else "--save")
+    if enable:
+        if plugin.perf_snapshot is None:
+            plugin.perf_snapshot = {
+                "governor": _read_leaf("scaling_governor"),
+                "min": _read_leaf("scaling_min_freq"),
+                "boost": _read_leaf("../../cpufreq/boost"),
+            }
+        ok = _write_all("scaling_governor", "performance")
+        ok = _write_all("scaling_min_freq", str(PERF_FLOOR_MHZ * 1000)) and ok
+        return _write_boost(True) and ok
+    snap = plugin.perf_snapshot or {}
+    plugin.perf_snapshot = None
+    ok = True
+    if snap.get("governor"):
+        ok = _write_all("scaling_governor", snap["governor"]) and ok
+    mn = snap.get("min") or _read_leaf("cpuinfo_min_freq")
+    if mn:
+        ok = _write_all("scaling_min_freq", mn) and ok
+    if snap.get("boost") is not None:
+        ok = _write_boost(snap["boost"] == "1") and ok
+    return ok
+
+
+PSTATE_MODES = ("active", "guided", "passive")
+
+# How long to leave the CPU alone after a mode switch, in seconds.
+PSTATE_SETTLE_S = 5.0
+
+
+def _apply_pstate(mode: str) -> bool:
+    """Switch amd_pstate mode. Verified by reading back, since the file
+    accepts a write and silently keeps the old value for anything the driver
+    will not do.
+
+    The kernel resets this to the amd_pstate= boot argument on every reboot,
+    which is exactly why exposing it here is worth doing: hhd re-applies its
+    own state at startup, so a choice made in the QAM survives a reboot with
+    no bootloader edit."""
+    if mode not in PSTATE_MODES:
+        return False
+    if _pstate_mode() == mode:
+        return True
+    try:
+        with open(PSTATE_STATUS, "w") as f:
+            f.write(mode)
+    except Exception:
+        return False
+    return _pstate_mode() == mode
+
+
+def _apply_pref(value: str) -> bool:
+    """EPP in active mode, cpufreq governor everywhere else."""
+    if _has_epp():
+        return _run("--epp", value)
+    return _write_all("scaling_governor", value)
+
+
+def _apply_boost(enabled: bool) -> bool:
+    if _has_epp():
+        return _run("--boost", "1" if enabled else "0")
+    return _write_boost(enabled)
+
+
+def _nominal_ceiling_khz() -> int | None:
+    try:
+        v = _read_leaf("cpuinfo_max_freq")
+        return int(v) if v else None
+    except Exception:
+        return None
+
+
+def _ensure_boost_for(max_mhz: int) -> None:
+    """Raising the ceiling above the nominal frequency is impossible while
+    boost is off: with boost disabled the kernel reports cpuinfo_max_freq as
+    the NOMINAL clock (3000 MHz on this machine, against a 5187 MHz boost
+    ceiling), and scaling_max_freq is clamped to it. Writes are accepted and
+    silently ignored, so a ceiling set from the QAM snapped straight back to
+    3000 with nothing logged.
+
+    Boost is therefore a precondition of the ceiling, not an independent
+    toggle, and is switched on before a write that needs it rather than
+    leaving the user to discover the coupling."""
+    hi = _nominal_ceiling_khz()
+    if hi is None or max_mhz * 1000 <= hi:
+        return
+    try:
+        with open(BOOST_PATH) as f:
+            if f.read().strip() == "1":
+                return
+    except Exception:
+        return
+    _write_boost(True)
+
+
+def _apply_freq(min_mhz: int | None, max_mhz: int | None) -> bool:
+    """Ceiling before floor when both move -- raising the floor first can be
+    rejected against a lower ceiling. z13ctl-plus does this ordering itself;
+    the sysfs path has to do it explicitly."""
+    if max_mhz is not None:
+        _ensure_boost_for(max_mhz)
+    if _has_epp():
+        if min_mhz is not None and max_mhz is not None:
+            return _run("--max-freq", str(max_mhz), "--min-freq", str(min_mhz))
+        if max_mhz is not None:
+            return _run("--max-freq", str(max_mhz))
+        if min_mhz is not None:
+            return _run("--min-freq", str(min_mhz))
+        return True
+    ok = True
+    if max_mhz is not None:
+        ok = _write_all("scaling_max_freq", str(int(max_mhz) * 1000)) and ok
+    if min_mhz is not None:
+        ok = _write_all("scaling_min_freq", str(int(min_mhz) * 1000)) and ok
+    return ok
+
+
 class Z13CpuPlugin(HHDPlugin):
     def __init__(self) -> None:
         self.name = "z13_cpu"
@@ -97,6 +361,16 @@ class Z13CpuPlugin(HHDPlugin):
         # None on purpose: forces one real apply on hhd's first update() call
         # rather than assuming the QAM's displayed default already matches
         # live hardware state.
+        self.old_pstate = None
+        # A mode switch tears down and rebuilds every cpufreq policy. Two
+        # hard lockups were traced to writes landing during that window --
+        # hhd's own adjustor was setting frequency scaling and z13ctl-plus was
+        # retrying a power preset around the same moment, and the machine froze
+        # with nothing in the journal (a hard lockup loses buffered writes).
+        # Nothing else is written until this deadline passes.
+        self._settle_until = 0.0
+        self.perf_snapshot = None
+
         self.old_epp = None
         self.old_boost = None
         self.old_perf = None
@@ -121,12 +395,49 @@ class Z13CpuPlugin(HHDPlugin):
         return {"z13_cpu": {"root": sets["z13_cpu"]}}
 
     def update(self, conf: Config):
-        new_perf = conf["z13_cpu.root.perf_mode"].to(str)
-        new_epp = conf["z13_cpu.root.epp"].to(str)
-        new_boost = conf["z13_cpu.root.boost"].to(str)
+        new_pstate = conf["z13_cpu.root.pstate.mode"].to(str)
+        new_perf = conf["z13_cpu.root.perf_mode"].to(bool)
+        # The control is nested under the mode that owns it, so the path
+        # follows the selection rather than a key fixed at startup.
+        pref_path = (
+            "z13_cpu.root.pstate.active.epp"
+            if new_pstate == "active"
+            else f"z13_cpu.root.pstate.{new_pstate}.governor"
+        )
+        new_epp = conf[pref_path].to(str)
+        # Resolved, not raw: in "auto" this follows the power source, so an
+        # AC transition changes the target without the setting changing. The
+        # comparison below is against the resolved value for that reason.
+        boost_setting = conf["z13_cpu.root.boost"].to(str)
+        new_boost = _resolve_boost(boost_setting)
         new_freq_mode = conf["z13_cpu.root.freq_mode.mode"].to(str)
         new_min_freq = conf["z13_cpu.root.freq_mode.manual.min_freq"].to(int)
         new_max_freq = conf["z13_cpu.root.freq_mode.manual.max_freq"].to(int)
+
+        # amd_pstate mode first: it decides which of the controls below even
+        # exist, so applying it before them avoids writing a governor to an
+        # EPP file (or the reverse) within the same tick. Adopt silently on
+        # the first tick like the others, so hhd starting up never itself
+        # switches the CPU driver.
+        if time.monotonic() < self._settle_until:
+            return
+
+        if self.old_pstate is None:
+            live_mode = _pstate_mode()
+            if live_mode in PSTATE_MODES:
+                self.old_pstate = live_mode
+                conf["z13_cpu.root.pstate.mode"] = live_mode
+        elif new_pstate != self.old_pstate:
+            self.old_pstate = new_pstate
+            _apply_pstate(new_pstate)
+            self._settle_until = time.monotonic() + PSTATE_SETTLE_S
+            # Everything below is invalidated: the driver changed, so the
+            # values we last agreed on describe a policy that no longer exists.
+            self.old_epp = None
+            self.old_boost = None
+            self.old_min_freq = None
+            self.old_max_freq = None
+            return
 
         # perf_mode is NOT like epp/boost: firing once unconditionally on the
         # first tick (self.old_perf is None) would run --save on every hhd
@@ -138,7 +449,7 @@ class Z13CpuPlugin(HHDPlugin):
             self.old_perf = new_perf
         elif new_perf != self.old_perf:
             self.old_perf = new_perf
-            _run("--perf" if new_perf == "enabled" else "--save")
+            _apply_perf(self, new_perf)
             # --perf/--save already set EPP+Boost+floor(+ceiling) as one
             # unit. Adopt whatever all four sliders currently read as
             # "already applied" for this tick, so stale slider values left
@@ -169,10 +480,10 @@ class Z13CpuPlugin(HHDPlugin):
         elif new_freq_mode != self.old_freq_mode:
             self.old_freq_mode = new_freq_mode
             if new_freq_mode == "manual":
-                if new_perf == "enabled":
-                    _run("--save")
-                    conf["z13_cpu.root.perf_mode"] = "disabled"
-                    self.old_perf = "disabled"
+                if new_perf:
+                    _apply_perf(self, False)
+                    conf["z13_cpu.root.perf_mode"] = False
+                    self.old_perf = False
                     # --save already re-set EPP+Boost as part of its unit;
                     # adopt the current slider values as "already applied"
                     # so the epp/boost blocks below don't immediately
@@ -198,15 +509,22 @@ class Z13CpuPlugin(HHDPlugin):
         # A user-driven change (config moved away from what we last agreed
         # on) always takes priority and is written out immediately, without
         # waiting for or depending on a read-back this same tick.
-        epp_changed_by_user = new_epp != self.old_epp
+        # If the mode was switched live, the schema built at startup no longer
+        # matches the hardware -- an EPP control against a driver with no EPP
+        # file, or a governor control in active mode. Writing either would be
+        # wrong, so hold off until hhd restarts and rebuilds the settings.
+        # Do not write a governor to a driver that wants EPP, or the reverse:
+        # the selection can be ahead of the hardware for a tick after a switch.
+        schema_stale = _has_epp() != (new_pstate == "active")
+        epp_changed_by_user = (not schema_stale) and new_epp != self.old_epp
         if epp_changed_by_user:
             self.old_epp = new_epp
-            _run("--epp", new_epp)
+            _apply_pref(new_epp)
 
-        boost_changed_by_user = new_boost != self.old_boost
+        boost_changed_by_user = new_boost is not None and new_boost != self.old_boost
         if boost_changed_by_user:
             self.old_boost = new_boost
-            _run("--boost", "1" if new_boost == "enabled" else "0")
+            _apply_boost(new_boost)
 
         # min_freq/max_freq are GATED by freq_mode: outside "manual" they are
         # hidden in the QAM and must never be applied to hardware -- Auto
@@ -234,12 +552,10 @@ class Z13CpuPlugin(HHDPlugin):
             if min_changed_by_user or max_changed_by_user:
                 self.old_min_freq = new_min_freq
                 self.old_max_freq = new_max_freq
-                if min_changed_by_user and max_changed_by_user:
-                    _run("--max-freq", str(new_max_freq), "--min-freq", str(new_min_freq))
-                elif max_changed_by_user:
-                    _run("--max-freq", str(new_max_freq))
-                else:
-                    _run("--min-freq", str(new_min_freq))
+                _apply_freq(
+                    new_min_freq if min_changed_by_user else None,
+                    new_max_freq if max_changed_by_user else None,
+                )
 
         # Reconciliation: only when nothing just moved (an in-flight user
         # write already handles those fields for this tick), and only every
@@ -256,15 +572,20 @@ class Z13CpuPlugin(HHDPlugin):
         if live is None:
             return
 
-        if live.get("epp") is not None and live["epp"] != self.old_epp:
-            self.old_epp = live["epp"]
-            conf["z13_cpu.root.epp"] = live["epp"]
+        live_pref = None if schema_stale else live.get("epp" if new_pstate == "active" else "governor")
+        if live_pref is not None and live_pref != self.old_epp:
+            self.old_epp = live_pref
+            conf[pref_path] = live_pref
 
-        if "boost" in live:
-            live_boost = "enabled" if live["boost"] else "disabled"
-            if live_boost != self.old_boost:
+        # Only reconcile an explicit choice. Under "auto" the power source is
+        # the authority, so pulling a live reading back into the config would
+        # overwrite the user's policy with a momentary state.
+        if "boost" in live and boost_setting in ("on", "off"):
+            live_boost = bool(live["boost"])
+            want = boost_setting == "on"
+            if live_boost != want:
                 self.old_boost = live_boost
-                conf["z13_cpu.root.boost"] = live_boost
+                conf["z13_cpu.root.boost"] = "on" if live_boost else "off"
 
         # Gated the same as the write side above: outside "manual" the
         # sliders are hidden, so there is nothing useful to reconcile them

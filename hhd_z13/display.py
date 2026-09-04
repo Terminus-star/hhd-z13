@@ -63,6 +63,23 @@ WHY MODE-ID RESOLUTION IS LIVE, NOT HARDCODED
     id by parsing `kscreen-doctor -o` and matching RESOLUTION@RATE by
     content, exactly like the script does; only the panel's own output
     (eDP-1) is ever named, so an external display's state is left alone.
+
+WHY THE RATE CAN FOLLOW THE POWER SOURCE
+    z13ctl-plus used to carry the refresh rate inside its AC/battery presets
+    ("On Battery: quiet, 60 Hz" / "Plugged In: balanced, 180 Hz"). That
+    policy had to be disabled (`z13ctl-plus preset policy --disable`)
+    because it fought hhd over TDP -- two daemons writing the same power
+    knobs -- and disabling it took the refresh rate down with it, leaving
+    the panel unmanaged on AC/battery transitions. The "auto" option here
+    restores only the half that was worth keeping: the panel follows the
+    power source, and nothing in this file goes anywhere near TDP.
+
+    It is deliberately the same shape as the CPU Boost control in
+    plugin.py -- a three-way auto/explicit `multiple`, a resolve helper
+    (_resolve_rate, mirroring _resolve_boost), a write decision made
+    against the RESOLVED value so an AC transition is a change even though
+    the setting did not move, and no reconciliation while in "auto"
+    because there the power source, not the panel, is the authority.
 """
 import json
 import os
@@ -75,6 +92,10 @@ from hhd.plugins import HHDPlugin, load_relative_yaml
 from hhd.plugins.conf import Config
 
 from . import gamescope
+# One source of truth for "are we on mains": the CPU plugin's AC read, reused
+# rather than copied, so the two auto-controls in this package can never
+# disagree about the power source within a tick.
+from .plugin import _on_ac
 
 OUTPUT = "eDP-1"
 RESOLUTION = "2560x1600"
@@ -95,6 +116,11 @@ _kscreen_cache = {"t": 0.0, "data": None}
 # The highest rate the panel is offered at. At this rate the framerate bridge
 # lifts gamescope's cap entirely rather than pinning it to a number.
 TOP_RATE = "180"
+# What "auto" drops to off mains -- the rate z13ctl-plus's battery preset used.
+BATTERY_RATE = "60"
+# The rates the control offers explicitly. Anything else in the setting (i.e.
+# "auto") is a policy, not a rate, and has to be resolved before it is used.
+RATES = (BATTERY_RATE, TOP_RATE)
 
 # kscreen-doctor accepts `output.<name>.vrrpolicy.<never|automatic|always>`.
 # It is absent from --help but works; confirmed by setting each in turn and
@@ -296,6 +322,35 @@ def bridge_fps_limit(session, rate):
     return gamescope.set_fps_limit(session, display, limit)
 
 
+def _resolve_rate(setting, backend):
+    """Map the three-way control onto an actual rate to drive the panel to,
+    or None for "leave the panel alone".
+
+    An explicit "60"/"180" is returned untouched: the user naming a rate
+    outranks the power source, so an AC transition must never override it.
+    "auto" resolves to the top rate on mains and the battery rate off it,
+    and gives up (None) in the two cases where guessing would be worse than
+    doing nothing:
+
+      * the power source cannot be read at all -- same call the CPU plugin's
+        boost control makes, same "leave it alone" answer it gives; and
+      * the backend is not kscreen, i.e. gamescope owns the foreground VT.
+        An explicit choice still reaches gamescope's own refresh control
+        (see set_rate), but a POLICY has no business flipping the panel
+        under a running game because a charger moved -- and gamescope's
+        vblank cannot follow a mid-session refresh change anyway (see
+        bridge_fps_limit).
+    """
+    if setting in RATES:
+        return setting
+    if backend != "kscreen":
+        return None
+    ac = _on_ac()
+    if ac is None:
+        return None
+    return TOP_RATE if ac else BATTERY_RATE
+
+
 def _run_as_user(session, args, timeout=KSCREEN_TIMEOUT_S):
     """subprocess.run dropped to the desktop session's uid/gid, mirroring
     hhd's own launch_overlay_de() precedent. Never raises -- a QAM control
@@ -488,20 +543,37 @@ class Z13DisplayPlugin(HHDPlugin):
         if not available:
             return
 
-        new_rate = conf["z13_display.root.status.available.refresh_rate"].to(str)
+        # Resolved, not raw, exactly like plugin.py's boost: under "auto" this
+        # follows the power source, so plugging the charger in or out changes
+        # the target WITHOUT the setting itself changing -- which is the whole
+        # point of the option, and the reason the comparison below is against
+        # the resolved rate rather than the config value.
+        rate_setting = conf["z13_display.root.status.available.refresh_rate"].to(str)
+        new_rate = _resolve_rate(rate_setting, backend)
 
         if self.old_rate is None:
+            # First tick after becoming available: ADOPT, never apply. Even in
+            # "auto" -- hhd starting up must not flicker the panel before it
+            # has established what the panel is already doing. If auto and the
+            # power source then disagree with that, the next tick applies it.
             live = read_rate(session, backend, display)
             if live is not None:
                 self.old_rate = live
-                conf["z13_display.root.status.available.refresh_rate"] = live
+                # Only ever write a rate back into an EXPLICIT setting. Doing
+                # it under "auto" would silently demote the user's policy to
+                # whatever the panel happened to be showing at startup.
+                if rate_setting != "auto":
+                    conf["z13_display.root.status.available.refresh_rate"] = live
             return
 
-        if new_rate != self.old_rate:
+        if new_rate is not None and new_rate != self.old_rate:
             self.old_rate = new_rate
             set_rate(session, new_rate, backend, display)
             # A nested gamescope cannot follow the panel; bring its framerate
-            # cap along instead. No-op when nothing nested is running.
+            # cap along instead. No-op when nothing nested is running. This
+            # sits on the shared write path on purpose, so an automatic
+            # AC-transition switch carries the cap along just like a manual
+            # one does -- the game does not care which of the two moved it.
             if backend == "kscreen":
                 bridge_fps_limit(session, new_rate)
             return
@@ -511,14 +583,22 @@ class Z13DisplayPlugin(HHDPlugin):
             return
         self._last_reconcile = now
 
-        live = read_rate(session, backend, display)
-        if live is not None and live != self.old_rate:
-            self.old_rate = live
-            conf["z13_display.root.status.available.refresh_rate"] = live
-            # Someone changed the rate outside hhd (KDE display settings, a
-            # script). The bridge applies the same either way.
-            if backend == "kscreen":
-                bridge_fps_limit(session, live)
+        # Reconcile an explicit choice only. Under "auto" the power source is
+        # the authority (same reasoning as the boost control's reconcile
+        # guard): pulling a live reading back into the config would overwrite
+        # the policy with a momentary state, and re-asserting the resolved
+        # rate every 15s would mean fighting KDE's own display settings for
+        # anyone who deliberately changed the rate mid-session. Auto stays
+        # quiet until the charger actually moves.
+        if rate_setting != "auto":
+            live = read_rate(session, backend, display)
+            if live is not None and live != self.old_rate:
+                self.old_rate = live
+                conf["z13_display.root.status.available.refresh_rate"] = live
+                # Someone changed the rate outside hhd (KDE display settings, a
+                # script). The bridge applies the same either way.
+                if backend == "kscreen":
+                    bridge_fps_limit(session, live)
 
         # --- adaptive sync -------------------------------------------------
         # kscreen-doctor only reaches KDE, so this is meaningless on the
