@@ -97,7 +97,7 @@ if [ "$MODE" = "--revert" ]; then
   systemctl daemon-reload
   systemctl restart systemd-journald
   say ""
-  say "mkinitcpio.conf may have been restored -- rerun 'mkinitcpio -P' if §4 had applied."
+  say "mkinitcpio.conf may have been restored -- rerun 'sudo limine-update' if §4 had applied."
   exit 0
 fi
 
@@ -259,9 +259,22 @@ if [ "$DO_MKINITCPIO" = 1 ]; then
   grep -qE '^HOOKS=.*hib-resume-prep' "$M" && NEEDS_HOOK_FIX=1
   if [ "$NEEDS_HOOK_FIX" = 1 ]; then
     say ""
-    say "hib-resume-prep: build() only calls add_runscript, and HOOKS uses"
-    say "'systemd', whose initrd does not execute legacy run_hook scripts."
-    say "It has never run. The hook files stay on disk; only the HOOKS entry goes."
+    say "hib-resume-prep: verified dead, not assumed dead."
+    say "  - its own comments say the backlight and amdgpu work was REMOVED as"
+    say "    non-functional; the real fix lives in systemd-sleep's"
+    say "    05-hibernate-hook.sh, which runs before the image write"
+    say "  - what remains is 3 modprobes (asus_nb_wmi, asus_wmi, amdgpu -- all"
+    say "    already pulled in by autodetect/kms) plus an opt-in debug flag"
+    say "  - run_hook unconditionally writes 3 lines to /dev/kmsg: there are"
+    say "    ZERO such lines in the kernel log"
+    say "  - run_hook unconditionally creates /run/hib-resume-prep.log on a"
+    say "    tmpfs cleared each boot: the file does not exist"
+    say "  - it probes ESP UUID 147C-2EA1; the real ESP is C2C3-D821, and /boot"
+    say "    is nvme0n1p7, not the nvme0n1p1 it falls back to"
+    say "  Reason it cannot run: HOOKS uses 'systemd', so systemd is PID1 in the"
+    say "  initramfs and legacy run_hook scripts (a 'base'/busybox-init feature)"
+    say "  are never sourced. Removing it changes nothing at runtime."
+    say "  The hook FILES stay on disk; only the HOOKS entry is removed."
   fi
   if [ "$NMOD" -le 1 ] && [ "$NEEDS_HOOK_FIX" = 0 ]; then
     skip "already clean"
@@ -279,34 +292,54 @@ if [ "$DO_MKINITCPIO" = 1 ]; then
     did "rewrote MODULES= and dropped hib-resume-prep from HOOKS"
     grep -nE '^MODULES=|^HOOKS=' "$M" | sed 's/^/    /'
 
+    # This system boots UKIs via limine, NOT /boot/initramfs-*.img:
+    #   - /etc/mkinitcpio.d/ is EMPTY, so `mkinitcpio -P` has no presets and
+    #     would exit 0 having rebuilt absolutely nothing -- a false green.
+    #   - images are .efi UKIs under $ESP/EFI/Linux/, built by
+    #     limine-mkinitcpio-install with `mkinitcpio --kernel V --uki OUT`.
+    # limine-update runs limine-install + limine-mkinitcpio, which is the
+    # supported standalone rebuild.
     say ""
-    say "rebuilding initramfs..."
-    if mkinitcpio -P; then
-      did "mkinitcpio -P succeeded"
-      # verify the images exist, are non-trivial, and contain amdgpu
-      OK=1
-      for img in /boot/initramfs-*.img; do
-        [ -e "$img" ] || continue
-        SZ=$(stat -c %s "$img")
-        [ "$SZ" -gt 1000000 ] || { echo "  ERROR: $img is only $SZ bytes"; OK=0; }
+    if ! command -v limine-update >/dev/null; then
+      echo "  ERROR: limine-update not found, and this system has no mkinitcpio"
+      echo "  presets, so there is no safe way to rebuild here. Restoring."
+      cp -a "$M$BAK" "$M"; exit 1
+    fi
+    UKI_DIR=$(/bin/ls -d /boot/EFI/Linux 2>/dev/null || true)
+    BEFORE=$(find "${UKI_DIR:-/nonexistent}" -name '*.efi' -newermt '-1 second' 2>/dev/null | wc -l)
+    say "rebuilding UKIs with limine-update (4 kernels installed)..."
+    if limine-update; then
+      did "limine-update succeeded"
+      OK=1; N=0
+      for uki in "${UKI_DIR:-/nonexistent}"/*.efi; do
+        [ -e "$uki" ] || continue
+        N=$((N+1))
+        SZ=$(stat -c %s "$uki")
+        if [ "$SZ" -lt 4000000 ]; then
+          echo "  ERROR: $(basename "$uki") is only $SZ bytes"; OK=0
+        else
+          say "  ok $(basename "$uki")  $(numfmt --to=iec "$SZ")"
+        fi
       done
-      if lsinitcpio -a /boot/initramfs-linux-cachyos.img 2>/dev/null | grep -qi amdgpu; then
-        did "amdgpu present in the rebuilt image"
-      else
-        say "WARNING: could not confirm amdgpu in the image -- check manually with"
-        say "  lsinitcpio -l /boot/initramfs-linux-cachyos.img | grep amdgpu"
+      [ "$N" -gt 0 ] || { echo "  ERROR: no UKIs found in ${UKI_DIR:-<unset>}"; OK=0; }
+      if [ "$OK" != 1 ]; then
+        echo "  ERROR: UKI verification failed. Restoring and rebuilding."
+        cp -a "$M$BAK" "$M"; limine-update; exit 1
       fi
-      [ "$OK" = 1 ] || { echo "  ERROR: image verification failed. Restoring."; \
-                         cp -a "$M$BAK" "$M"; mkinitcpio -P; exit 1; }
+      did "$N UKI(s) rebuilt and non-trivial"
+      say ""
+      say "amdgpu is compiled as a module and is pulled in by the kms hook as"
+      say "well as MODULES=, so it is present either way -- the point of the"
+      say "MODULES= merge is that it stops being accidental."
       say ""
       say "DO NOT REBOOT until you are happy with the above."
-      say "To undo: sudo $0 --revert && sudo mkinitcpio -P"
+      say "To undo: sudo $0 --revert && sudo limine-update"
     else
-      echo "  ERROR: mkinitcpio failed. Restoring $M and rebuilding."
-      cp -a "$M$BAK" "$M"; mkinitcpio -P; exit 1
+      echo "  ERROR: limine-update failed. Restoring $M and rebuilding."
+      cp -a "$M$BAK" "$M"; limine-update; exit 1
     fi
   else
-    would "merge MODULES= (dropping pinctrl_tigerlake), drop hib-resume-prep, then mkinitcpio -P"
+    would "merge MODULES= (dropping pinctrl_tigerlake), drop hib-resume-prep, then limine-update"
   fi
 fi
 
