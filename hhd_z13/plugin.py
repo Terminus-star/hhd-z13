@@ -433,28 +433,34 @@ class Z13CpuPlugin(HHDPlugin):
         # merge_reduce() a string. See hhd/plugins/settings.py
         # merge_reduce_sec()/merge_reduce().
         sets = load_relative_yaml("./settings.yml")
-        return {"z13_cpu": {"root": sets["z13_cpu"]}}
+        # Mounted under the "tdp" SECTION, beside adjustor's own asus/lenovo/
+        # msi/battery entries, rather than as a section of its own. hhd's
+        # section list is fixed -- hhd/sections.yml, ten keys, served to the UI
+        # over /sections -- so a top-level key that is not in it has nowhere to
+        # be filed and renders as an orphan. "z13_cpu" was exactly that; it is
+        # now the section_name, which is what the placeholder "root" used to be.
+        return {"tdp": {"z13_cpu": sets["z13_cpu"]}}
 
     def update(self, conf: Config):
-        new_pstate = conf["z13_cpu.root.pstate.mode"].to(str)
-        new_perf = conf["z13_cpu.root.perf_mode"].to(bool)
+        new_pstate = conf["tdp.z13_cpu.pstate.mode"].to(str)
+        new_perf = conf["tdp.z13_cpu.perf_mode"].to(bool)
         # The control is nested under the mode that owns it, so the path
         # follows the selection rather than a key fixed at startup.
         pref_path = (
-            "z13_cpu.root.pstate.active.epp"
+            "tdp.z13_cpu.pstate.active.epp"
             if new_pstate == "active"
-            else f"z13_cpu.root.pstate.{new_pstate}.governor"
+            else f"tdp.z13_cpu.pstate.{new_pstate}.governor"
         )
         new_epp = conf[pref_path].to(str)
         # Resolved, not raw: in "auto" this follows the power source, so an
         # AC transition changes the target without the setting changing. The
         # comparison below is against the resolved value for that reason.
-        boost_mode = conf["z13_cpu.root.boost.mode"].to(str)
-        boost_manual = conf["z13_cpu.root.boost.manual.enabled"].to(bool)
+        boost_mode = conf["tdp.z13_cpu.boost.mode"].to(str)
+        boost_manual = conf["tdp.z13_cpu.boost.manual.enabled"].to(bool)
         new_boost = _resolve_boost(boost_mode, boost_manual)
-        new_freq_mode = conf["z13_cpu.root.freq_mode.mode"].to(str)
-        new_min_freq = conf["z13_cpu.root.freq_mode.manual.min_freq"].to(int)
-        new_max_freq = conf["z13_cpu.root.freq_mode.manual.max_freq"].to(int)
+        new_freq_mode = conf["tdp.z13_cpu.freq_mode.mode"].to(str)
+        new_min_freq = conf["tdp.z13_cpu.freq_mode.manual.min_freq"].to(int)
+        new_max_freq = conf["tdp.z13_cpu.freq_mode.manual.max_freq"].to(int)
 
         # amd_pstate mode first: it decides which of the controls below even
         # exist, so applying it before them avoids writing a governor to an
@@ -468,7 +474,7 @@ class Z13CpuPlugin(HHDPlugin):
             live_mode = _pstate_mode()
             if live_mode in PSTATE_MODES:
                 self.old_pstate = live_mode
-                conf["z13_cpu.root.pstate.mode"] = live_mode
+                conf["tdp.z13_cpu.pstate.mode"] = live_mode
         elif new_pstate != self.old_pstate:
             self.old_pstate = new_pstate
             _apply_pstate(new_pstate)
@@ -524,7 +530,7 @@ class Z13CpuPlugin(HHDPlugin):
             if new_freq_mode == "manual":
                 if new_perf:
                     _apply_perf(self, False)
-                    conf["z13_cpu.root.perf_mode"] = False
+                    conf["tdp.z13_cpu.perf_mode"] = False
                     self.old_perf = False
                     # --save already re-set EPP+Boost as part of its unit;
                     # adopt the current slider values as "already applied"
@@ -536,11 +542,11 @@ class Z13CpuPlugin(HHDPlugin):
                 if live is not None:
                     if live.get("min_frequency_khz") is not None:
                         v = round(live["min_frequency_khz"] / 1000)
-                        conf["z13_cpu.root.freq_mode.manual.min_freq"] = v
+                        conf["tdp.z13_cpu.freq_mode.manual.min_freq"] = v
                         self.old_min_freq = v
                     if live.get("max_frequency_khz") is not None:
                         v = round(live["max_frequency_khz"] / 1000)
-                        conf["z13_cpu.root.freq_mode.manual.max_freq"] = v
+                        conf["tdp.z13_cpu.freq_mode.manual.max_freq"] = v
                         self.old_max_freq = v
                 # else: live read failed. Leave old_min_freq/old_max_freq and
                 # the sliders as they were -- the ordinary reconciliation
@@ -638,7 +644,7 @@ class Z13CpuPlugin(HHDPlugin):
             live_boost = bool(live["boost"])
             if live_boost != boost_manual:
                 self.old_boost = live_boost
-                conf["z13_cpu.root.boost.manual.enabled"] = live_boost
+                conf["tdp.z13_cpu.boost.manual.enabled"] = live_boost
 
         # Gated the same as the write side above: outside "manual" the
         # sliders are hidden, so there is nothing useful to reconcile them
@@ -650,10 +656,10 @@ class Z13CpuPlugin(HHDPlugin):
                 live_min = round(live["min_frequency_khz"] / 1000)
                 if live_min != self.old_min_freq:
                     self.old_min_freq = live_min
-                    conf["z13_cpu.root.freq_mode.manual.min_freq"] = live_min
+                    conf["tdp.z13_cpu.freq_mode.manual.min_freq"] = live_min
 
             if live.get("max_frequency_khz") is not None:
                 live_max = round(live["max_frequency_khz"] / 1000)
                 if live_max != self.old_max_freq:
                     self.old_max_freq = live_max
-                    conf["z13_cpu.root.freq_mode.manual.max_freq"] = live_max
+                    conf["tdp.z13_cpu.freq_mode.manual.max_freq"] = live_max
