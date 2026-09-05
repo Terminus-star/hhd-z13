@@ -1,54 +1,59 @@
 #!/usr/bin/env python3
-"""Move hhd-z13's stored settings under the sections they now mount into.
+"""Move hhd-z13's stored settings under the containers they now mount into.
 
-    z13_cpu.root.*      ->  tdp.z13_cpu.*
-    z13_display.root.*  ->  gamemode.z13_display.*
+    tdp.z13_cpu.*           ->  tdp.amd_energy.z13_cpu.*
+    gamemode.z13_display.*  ->  gamemode.display.z13_display.*
+
+Also handles the older orphan shape, if a machine skipped a step:
+
+    z13_cpu.root.*          ->  tdp.amd_energy.z13_cpu.*
+    z13_display.root.*      ->  gamemode.display.z13_display.*
 
 WHY THIS IS NEEDED
-    The plugins used to return {"z13_cpu": {"root": ...}}, making "z13_cpu" a
-    top-level key. hhd's section list is fixed (hhd/sections.yml, ten keys), so
-    that key had nowhere to be filed and rendered as an orphan section. The
-    plugins now mount under "tdp" and "gamemode" like every other driver does.
-
-    Config paths follow the mount point, so the stored values are orphaned by
-    that change. Without this migration hhd finds nothing at the new paths and
-    writes the YAML defaults instead -- and settings.yml defaults
-    pstate.mode to "guided" while this machine has "active" stored. The result
-    would be amd_pstate silently switching mode on the next hhd start: a live
-    hardware change caused by a UI reorganisation.
+    Config paths follow the mount point. The plugins now nest inside
+    adjustor's "Processor Settings" container and hhd's own "Display"
+    container, so stored values one level up are orphaned by the change --
+    hhd finds nothing at the new paths and writes the YAML defaults over them.
 
 WHY LINE-BASED RATHER THAN yaml.safe_load/dump
     state.yml carries a large auto-generated comment tree documenting every
     setting path. A YAML round-trip discards all of it. This moves the exact
     lines instead, so everything it does not touch is preserved byte for byte.
 
-    ./migrate-state-sections.py            # dry run, prints the diff
+    ./migrate-state-sections.py            # dry run
     sudo ./migrate-state-sections.py --apply
 """
 import shutil
 import sys
 
 STATE = "/etc/hhd/state.yml"
-BAK = STATE + ".z13-presection"
+BAK = STATE + ".z13-container"
 
-MOVES = [("z13_cpu", "tdp"), ("z13_display", "gamemode")]
+# (key to move, destination section, destination container)
+MOVES = [
+    ("z13_cpu", "tdp", "amd_energy"),
+    ("z13_display", "gamemode", "display"),
+]
 
 
-def top_level_blocks(lines):
-    """-> {key: (start, end)} for every top-level `key:` line."""
-    out, cur, start = {}, None, 0
-    for i, ln in enumerate(lines):
-        if ln and not ln[0].isspace() and ln.rstrip().endswith(":") and "#" not in ln.split(":")[0]:
-            if cur:
-                out[cur] = (start, i)
-            cur, start = ln.split(":")[0], i
-        elif ln.startswith("#") and cur:
-            # the trailing comment tree ends the last block
-            out[cur] = (start, i)
-            cur = None
-    if cur:
-        out[cur] = (start, len(lines))
-    return out
+def block(lines, start, indent):
+    """End index of the block opened at `start` by a key at `indent`."""
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if not ln.strip() or ln.lstrip().startswith("#"):
+            continue
+        if len(ln) - len(ln.lstrip()) <= indent:
+            return j
+    return len(lines)
+
+
+def find_key(lines, span, key, indent):
+    """Index of `<indent>key:` within span, or None."""
+    want = " " * indent + key + ":"
+    for i in range(*span):
+        if lines[i].rstrip() == want:
+            return i
+    return None
 
 
 def main():
@@ -56,48 +61,74 @@ def main():
     with open(STATE) as f:
         lines = f.read().split("\n")
 
-    blocks = top_level_blocks(lines)
-    todo = [(src, dst) for src, dst in MOVES if src in blocks]
-    if not todo:
-        print("  nothing to migrate -- no orphan sections found")
-        return 0
-    for _, dst in todo:
-        if dst not in blocks:
-            print(f"  ERROR: destination section '{dst}:' not present, aborting")
-            return 1
+    drop, inserts, did = set(), {}, []
 
-    # Build the moved payloads first, then splice, so indices stay valid.
-    payload = {}
-    for src, dst in todo:
-        s, e = blocks[src]
-        body = [l for l in lines[s + 1 : e] if l.strip()]
-        if not body or body[0].strip() != "root:":
-            print(f"  ERROR: {src}: does not start with 'root:', aborting")
+    for key, section, container in MOVES:
+        sec_at = find_key(lines, (0, len(lines)), section, 0)
+        if sec_at is None:
+            print(f"  ERROR: section '{section}:' not present, aborting")
             return 1
-        # Only the KEY LINE moves; the children keep their indentation.
-        #   z13_cpu:      (0)  ->    z13_cpu:   (2, under tdp:)
-        #     root:       (2)  ->    [dropped]
-        #       pstate:   (4)  ->      pstate:  (4, unchanged)
-        # Dedenting the children would put them level with the new key and
-        # make them siblings rather than its contents -- which parses as
-        # `z13_cpu: null` and silently loses every stored value.
-        moved = [f"  {src}:"] + body[1:]
-        payload[src] = moved
-        print(f"  {src}.root.*  ->  {dst}.{src}.*   ({len(moved) - 1} lines)")
+        sec_span = (sec_at, block(lines, sec_at, 0))
+
+        # already nested?
+        cont_at = find_key(lines, sec_span, container, 2)
+        if cont_at is not None:
+            cont_span = (cont_at, block(lines, cont_at, 2))
+            if find_key(lines, cont_span, key, 4) is not None:
+                print(f"  {section}.{container}.{key}: already migrated")
+                continue
+
+        # source: <section>.<key> at indent 2, or the old top-level orphan
+        src_at = find_key(lines, sec_span, key, 2)
+        if src_at is not None:
+            src_span = (src_at, block(lines, src_at, 2))
+            body = lines[src_at + 1 : src_span[1]]
+        else:
+            src_at = find_key(lines, (0, len(lines)), key, 0)
+            if src_at is None:
+                print(f"  {key}: nothing stored, skipping")
+                continue
+            src_span = (src_at, block(lines, src_at, 0))
+            body = [l for l in lines[src_at + 1 : src_span[1]] if l.strip()]
+            if not body or body[0].strip() != "root:":
+                print(f"  ERROR: {key}: expected 'root:', aborting")
+                return 1
+            body = body[1:]
+
+        # Children shift right by 2 to sit under a key that is itself one level
+        # deeper. Getting this wrong is silent in both directions: too little
+        # indent makes the children siblings of their own key (parses as
+        # `<key>: null`, losing every value), too much buries them below where
+        # the plugin reads.
+        moved = ["    " + key + ":"] + ["  " + l if l.strip() else l for l in body]
+
+        if cont_at is None:
+            # hhd only writes containers that hold stored values, so the
+            # destination may legitimately not exist yet -- create it.
+            moved = ["  " + container + ":"] + moved
+            anchor = sec_at
+            print(f"  {section}.{key}  ->  {section}.{container}.{key}"
+                  f"   (creating '{container}:', {len(body)} lines)")
+        else:
+            anchor = cont_at
+            print(f"  {section}.{key}  ->  {section}.{container}.{key}"
+                  f"   ({len(body)} lines)")
+
+        drop.update(range(*src_span))
+        inserts.setdefault(anchor, []).extend(moved)
+        did.append(key)
+
+    if not did:
+        print("  nothing to do")
+        return 0
 
     out = []
     for i, ln in enumerate(lines):
-        skip = False
-        for src, _ in todo:
-            s, e = blocks[src]
-            if s <= i < e:
-                skip = True
-        if skip:
+        if i in drop:
             continue
         out.append(ln)
-        for src, dst in todo:
-            if i == blocks[dst][0]:
-                out.extend(payload[src])
+        if i in inserts:
+            out.extend(inserts[i])
 
     if not apply:
         print("\n  DRY RUN. Re-run with --apply (as root) to write.")
