@@ -371,6 +371,49 @@ def _reexpand_ceiling() -> None:
         logger.warning(f"Could not re-expand the CPU ceiling: {e}")
 
 
+def _release_freq_clamp() -> None:
+    """Hand the frequency limits back to the hardware's full range.
+
+    Leaving Manual used to do nothing, on the stated assumption that the
+    limits "simply stop being gated". They do not: the last manual write stays
+    in scaling_min_freq/scaling_max_freq, unowned, until something else
+    rebuilds the cpufreq policies -- a reboot, or an amd_pstate mode switch.
+    So a floor dragged to 2000 MHz in Manual survived a switch back to Auto
+    and kept the CPU off its idle clocks indefinitely, which is the opposite
+    of what the label promises. Measured 2026-09-06.
+
+    Writes the hardware's own limits rather than remembered values, because
+    cpuinfo_* IS what an unclamped policy looks like, and it already tracks
+    the current boost state -- so this lands correctly whether boost is on or
+    off, and _reexpand_ceiling() widens the ceiling later if boost turns on.
+
+    Fires ONLY on the manual -> auto transition, never continuously. Auto
+    means this plugin does not manage the limits, so re-asserting them every
+    tick would be managing them -- and would fight the EPP/Perf Mode/preset
+    that Auto exists to defer to.
+    """
+    try:
+        lo = _read_leaf("cpuinfo_min_freq")
+        hi = _read_leaf("cpuinfo_max_freq")
+        if not lo or not hi:
+            return
+        cur_lo = _read_leaf("scaling_min_freq")
+        cur_hi = _read_leaf("scaling_max_freq")
+        # Ceiling before floor: raising the floor first can be rejected
+        # against a ceiling that is still low. Same ordering _apply_freq()
+        # documents for z13ctl-plus.
+        ok = _write_all("scaling_max_freq", hi)
+        ok = _write_all("scaling_min_freq", lo) and ok
+        if ok and (cur_lo != lo or cur_hi != hi):
+            logger.info(
+                f"Released CPU frequency clamp: "
+                f"[{int(cur_lo or 0) // 1000}, {int(cur_hi or 0) // 1000}] -> "
+                f"[{int(lo) // 1000}, {int(hi) // 1000}] MHz"
+            )
+    except Exception as e:
+        logger.warning(f"Could not release the CPU frequency clamp: {e}")
+
+
 def _apply_freq(min_mhz: int | None, max_mhz: int | None) -> bool:
     """Ceiling before floor when both move -- raising the floor first can be
     rejected against a lower ceiling. z13ctl-plus does this ordering itself;
@@ -534,9 +577,12 @@ class Z13CpuPlugin(HHDPlugin):
         # the manual sliders from LIVE clocks rather than a stale value left
         # over from the last time Manual was used, so flipping the selector
         # alone never itself changes anything the CPU is actually doing.
-        # Leaving "manual" (back to auto) needs no action: frequency limits
-        # simply stop being gated, and whatever EPP/Perf Mode/an active
-        # z13ctl-plus preset says next takes over as normal. Adopt the
+        # Leaving "manual" (back to auto) RELEASES the clamp. This used to do
+        # nothing, on the assumption that the limits "simply stop being gated"
+        # and something else takes over -- but nothing does: the last manual
+        # write stays in scaling_min/max_freq, unowned, until a reboot or an
+        # amd_pstate switch rebuilds the policies. A 2000 MHz floor set in
+        # Manual therefore survived the switch back to Auto. Adopt the
         # starting value silently on the very first tick, same as perf_mode
         # above, so hhd startup never fires this unconditionally.
         if self.old_freq_mode is None:
@@ -568,6 +614,14 @@ class Z13CpuPlugin(HHDPlugin):
                 # the sliders as they were -- the ordinary reconciliation
                 # path below will pick up real values on its own schedule
                 # once freq_mode is "manual", same as any other drift.
+            else:
+                # Manual -> Auto: give the limits back to the hardware, then
+                # stop touching them. old_min/max_freq are cleared so the next
+                # entry into Manual re-reads live clocks rather than comparing
+                # against the values this release just invalidated.
+                _release_freq_clamp()
+                self.old_min_freq = None
+                self.old_max_freq = None
             return
 
         # A user-driven change (config moved away from what we last agreed
