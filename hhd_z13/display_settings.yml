@@ -60,8 +60,8 @@ z13_display:
                       options:
                         # Quoted deliberately: YAML 1.1 turns a bare 60/180 into an int,
                         # which breaks the string comparisons in display.py.
-                        "60": 60 Hz
-                        "180": 180 Hz
+                        "60": 60Hz
+                        "180": 180Hz
                       hint: >-
                         A fixed rate, ignoring the power source. Only shown while the mode
                         above is Manual.
