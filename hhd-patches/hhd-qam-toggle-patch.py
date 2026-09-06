@@ -126,6 +126,17 @@ def find_adjustor_asus():
     return hits[-1]
 
 
+def find_adjustor_hhd():
+    """adjustor's plugin entry point, which owns hhd.settings.tdp_ready.
+
+    A different file from the ASUS driver above, so it needs its own row.
+    """
+    hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/hhd.py"))
+    if not hits:
+        sys.exit("ERROR: adjustor/hhd.py not found (is adjustor installed?)")
+    return hits[-1]
+
+
 def find_hhd_utils():
     """hhd/utils.py, which owns the AC-status read. Full file path."""
     hits = sorted(glob.glob("/usr/lib/python3*/site-packages/hhd/utils.py"))
@@ -688,6 +699,54 @@ ADJUSTOR_ASUS_PATCHES = (
 )
 
 
+# Keep adjustor's TDP alive across a settings rebuild.
+#
+# THE BUG
+#   hhd.settings.tdp_ready is declared as a bool with NO default, so a
+#   settings rebuild resets it to None. The only code that sets it sits behind
+#
+#       if self.init or not enabled or self.failed:
+#           return
+#
+#   and self.init latches True on the first successful initialisation. So the
+#   assignment runs exactly once, and ANY rebuild afterwards leaves tdp_ready
+#   unset permanently.
+#
+#   AsusDriverPlugin, BatteryPlugin and GpuPlugin all gate their settings() on
+#   it, so the entire TDP section vanishes from the QAM -- observed exactly
+#   that: adjustor's asus/battery/tdp containers gone, only amd_energy left,
+#   and the sections reordered because tdp was then contributed later than
+#   gamemode. It comes back on an hhd restart, which clears self.init, so it
+#   reads as intermittent rather than as a rebuild being fatal.
+#
+#   Reachable on stock hhd: adjustor emits a rebuild itself whenever
+#   enforce_limits changes. hhd-z13 hits it more often, because its preset
+#   list and its boost-gated Power Limits control both change what the tree
+#   CONTAINS, and a rebuild is the only way hhd allows that.
+#
+#   The fix re-asserts the flag on the way out rather than moving the
+#   assignment, so the one-shot initialisation below still happens once.
+ADJUSTOR_INIT_PATCHES = (
+    (
+        "tdp-ready-reassert",
+        "        if self.init or not enabled or self.failed:\n            return\n",
+        """\
+        if self.init or not enabled or self.failed:
+            # {mark}: re-assert tdp_ready before returning. It has no default,
+            # so a settings rebuild clears it, and this guard means the block
+            # below -- the only place that sets it -- never runs again once
+            # self.init has latched. Everything downstream gates on it, so the
+            # TDP section disappears until hhd restarts.
+            if self.init and not self.failed:
+                conf["hhd.settings.tdp_ready"] = True
+            return
+""",
+        "if self.init and not self.failed:",
+        "replace",
+    ),
+)
+
+
 # Backport of hhd's own AC-status fix, so this machine gets it on 4.1.12.
 #
 # 4.1.12 resolves the AC ADAPTER's `online` file (contents "0"/"1") but then
@@ -827,9 +886,10 @@ def main():
     a_fuse = find_adjustor_fuse()
     a_utils = find_hhd_utils()
     a_asus = find_adjustor_asus()
+    a_init = find_adjustor_hhd()
     # Membership here is what gives a file backup(), revert() and the
     # pycache purge for free -- all three already iterate this tuple.
-    adj = (a_gpu, a_fuse, a_utils, a_asus)
+    adj = (a_gpu, a_fuse, a_utils, a_asus, a_init)
     mode = sys.argv[1] if len(sys.argv) > 1 else "--apply"
 
     if mode == "--check":
@@ -853,6 +913,7 @@ def main():
         # Deliberately not folded into the loop above: that loop hardcodes
         # the label 'cpu-native', and this table is a different mark.
         print(f"  {'adjustor/asus':14s} {'tdp-presets':12s} {marked_state(a_asus, ADJUSTOR_ASUS_PATCHES)}")
+        print(f"  {'adjustor/hhd.py':14s} {'tdp-presets':12s} {marked_state(a_init, ADJUSTOR_INIT_PATCHES)}")
         return
 
     if mode == "--revert":
@@ -877,6 +938,7 @@ def main():
         ("adjustor/fuse", lambda p: apply_marked(p, ADJUSTOR_FUSE_PATCHES), a_fuse),
         ("hhd/utils.py", lambda p: apply_marked(p, UTILS_PATCHES, MARK_AC), a_utils),
         ("adjustor/asus", lambda p: apply_marked(p, ADJUSTOR_ASUS_PATCHES, MARK_TDP), a_asus),
+        ("adjustor/hhd.py", lambda p: apply_marked(p, ADJUSTOR_INIT_PATCHES, MARK_TDP), a_init),
     ):
         ok, msg = fn(arg)
         results.append((name, ok, msg))

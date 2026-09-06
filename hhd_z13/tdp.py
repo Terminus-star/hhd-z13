@@ -7,10 +7,15 @@ ONE SLIDER, NOT TWO
     into the selected preset.
 
     An earlier attempt gave each preset its own sliders and hid adjustor's by
-    tagging them `hide`. That does not work -- verified against the live tree,
-    where the tags read ['hide'] and hhd-ui rendered the controls anyway.
-    `hide` is honoured for hhd's own `version` field and evidently not for
-    ordinary controls, so a duplicate can only be removed structurally.
+    tagging them `hide`. That tag does nothing -- verified against the live
+    tree, where the tags read ['hide'] and hhd-ui rendered the controls
+    anyway. The working tag is `hidden`: adjustor uses it on
+    hhd.settings.tdp_ready, which really is invisible.
+
+    Kept structural anyway. Hiding upstream's controls to make room for ours
+    is a worse answer than not duplicating them in the first place, and it
+    would leave someone who disables this plugin with no TDP slider at all
+    until they noticed why.
 
 WHY PRESETS ARE DATA, NOT MODES
     The first version added preset MODES to adjustor's TDP dropdown. It lost
@@ -450,6 +455,31 @@ class Z13TdpPlugin(HHDPlugin):
             if STATUS not in conf:
                 return
 
+            # Resolve the patch state BEFORE deciding to rebuild.
+            if self._patched is None:
+                self._patched = _adjustor_is_patched()
+                if self._patched is False and not self._warned:
+                    self._warned = True
+                    logger.error(
+                        "adjustor is not carrying the z13-tdp-presets patch: "
+                        "presets still work, but PL2/PL3 will be derived by "
+                        "adjustor, and the preset list cannot refresh without "
+                        "an hhd restart. Run hhd-patches/install.sh."
+                    )
+
+            # A settings rebuild is FATAL to an unpatched adjustor.
+            # hhd.settings.tdp_ready is declared with no default, so a rebuild
+            # resets it to None, and adjustor only ever sets it once -- the
+            # assignment sits behind `if self.init or ...: return`, and
+            # self.init latches on first initialisation. Its Asus, battery and
+            # init plugins all gate settings() on that flag, so the entire TDP
+            # section disappears from the QAM until hhd restarts.
+            #
+            # The z13-tdp-presets patch re-asserts the flag and makes rebuilds
+            # safe. Without it we do not rebuild at all: a control of ours
+            # appearing is never worth the user's TDP controls vanishing.
+            can_rebuild = self._patched is not False
+
             rebuild = False
             if conf.get_action(ADD):
                 rebuild = self._resize(conf, +1)
@@ -461,24 +491,20 @@ class Z13TdpPlugin(HHDPlugin):
             # the control to appear or go. Compared against what the CURRENT
             # tree was built for, so this fires once per toggle, not per tick.
             boost = conf.get(CUSTOM_BOOST, True)
-            if boost != self._gen_boost:
+            if can_rebuild and boost != self._gen_boost:
                 self._gen_boost = boost
                 rebuild = True
 
-            if rebuild:
+            if rebuild and can_rebuild:
                 self.emit({"type": "settings"})
+            elif rebuild:
+                logger.warning(
+                    "Not rebuilding the settings tree: adjustor is unpatched "
+                    "and would lose its TDP section. The change is saved and "
+                    "shows up after `systemctl restart hhd@<user>`."
+                )
 
             self._telemetry(conf)
-
-            if self._patched is None:
-                self._patched = _adjustor_is_patched()
-                if self._patched is False and not self._warned:
-                    self._warned = True
-                    logger.error(
-                        "adjustor is not carrying the z13-tdp-presets patch: "
-                        "presets still work, but PL2/PL3 will be derived by "
-                        "adjustor instead. Run hhd-patches/install.sh."
-                    )
             conf[STATUS] = "" if self._patched is not False else PATCH_WARNING
         except Exception as e:
             logger.warning(f"TDP preset update failed: {e}")

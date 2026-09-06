@@ -249,13 +249,47 @@ so the divergence is visible rather than surprising.
 not `z13-cpu-disable-native`: that one means "adjustor stops writing this
 because hhd-z13 owns it", and this is the opposite.
 
-Three `"replace"` entries:
+Four `"replace"` entries, across two adjustor files:
 
-| label | effect |
-|---|---|
-| `ppt-override` | write explicit PL2/PL3 when a preset supplies them |
-| `wakeup-clock` | `time.time()` → `time.perf_counter()` |
-| `acdc-clock` | `time.time()` → `time.perf_counter()` |
+| file | label | effect |
+|---|---|---|
+| `drivers/asus/__init__.py` | `ppt-override` | write explicit PL2/PL3 when a preset supplies them |
+| | `wakeup-clock` | `time.time()` → `time.perf_counter()` |
+| | `acdc-clock` | `time.time()` → `time.perf_counter()` |
+| `hhd.py` | `tdp-ready-reassert` | keep `tdp_ready` set across a settings rebuild |
+
+### Why `tdp-ready-reassert` exists
+
+**A settings rebuild permanently disables adjustor's TDP.** `tdp_ready` is
+declared as a `bool` with no default, so a rebuild resets it to `None`, and
+the only code that sets it sits behind:
+
+```python
+if self.init or not enabled or self.failed:
+    return
+```
+
+`self.init` latches `True` on the first successful initialisation, so that
+assignment runs exactly once. Every rebuild afterwards leaves the flag unset.
+`AsusDriverPlugin`, `BatteryPlugin` and `AdjustorInitPlugin` all gate
+`settings()` on it, so the **entire TDP section vanishes from the QAM** until
+hhd restarts — which makes it read as intermittent rather than as "a rebuild
+is fatal".
+
+Observed exactly that: `tdp` reduced to `amd_energy` alone, and the sidebar
+reordered because `tdp` was then contributed later than `gamemode`.
+
+It is reachable on stock hhd — adjustor emits a rebuild itself when
+`enforce_limits` changes. hhd-z13 meets it more often, because the preset list
+and the boost-gated Power Limits control both change what the tree *contains*,
+and a rebuild is the only mechanism hhd offers for that.
+
+The patch re-asserts the flag on the way out rather than moving the
+assignment, so the one-shot initialisation still happens once.
+
+Until it is applied, the plugin **refuses to rebuild at all** — Add/Remove
+still save, and appear after an hhd restart. A control of ours appearing is
+never worth the user's TDP controls disappearing.
 
 ### Why `ppt-override` exists
 
