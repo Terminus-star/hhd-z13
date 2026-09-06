@@ -118,9 +118,27 @@ _kscreen_cache = {"t": 0.0, "data": None}
 TOP_RATE = "180"
 # What "auto" drops to off mains -- the rate z13ctl-plus's battery preset used.
 BATTERY_RATE = "60"
-# The rates the control offers explicitly. Anything else in the setting (i.e.
-# "auto") is a policy, not a rate, and has to be resolved before it is used.
-RATES = (BATTERY_RATE, TOP_RATE)
+# A tier ABOVE TOP_RATE rather than an independent toggle: the same 180 Hz,
+# with panel overdrive on. Overdrive's usefulness scales with refresh -- at
+# 60 Hz a frame lasts 16.7 ms and most pixel transitions finish unaided, at
+# 180 Hz they get 5.6 ms and cannot -- so it belongs on the same ladder. It
+# also makes the bad combination unreachable: the overshoot is tuned for the
+# short frame, and holding it across a 60 Hz frame is where inverse ghosting
+# shows up.
+OVERDRIVE_RATE = "overdrive"
+# The selections the control offers explicitly. Anything else in the setting
+# (i.e. "auto") is a policy, not a selection, and is resolved before use.
+RATES = (BATTERY_RATE, TOP_RATE, OVERDRIVE_RATE)
+
+
+def _rate_hz(sel):
+    """The actual refresh rate a selection asks for.
+
+    OVERDRIVE_RATE is not a rate the panel understands -- it is TOP_RATE plus
+    a firmware flag -- so everything that talks to kscreen or the framerate
+    bridge has to go through this rather than using the raw selection.
+    """
+    return TOP_RATE if sel == OVERDRIVE_RATE else sel
 
 # kscreen-doctor accepts `output.<name>.vrrpolicy.<never|automatic|always>`.
 # It is absent from --help but works; confirmed by setting each in turn and
@@ -320,6 +338,32 @@ def bridge_fps_limit(session, rate):
     except (TypeError, ValueError):
         return False
     return gamescope.set_fps_limit(session, display, limit)
+
+
+def _apply_overdrive(on: bool) -> None:
+    """Set the panel overdrive firmware flag, best effort.
+
+    Reuses firmware.py's reader/writer rather than opening the attribute here
+    -- that module already validates against possible_values and reads back
+    after writing, because asus-armoury reports a firmware rejection
+    inconsistently.
+
+    Never raises and never blocks the rate change. Overdrive is an image
+    quality refinement; if the attribute is missing on some firmware the rate
+    itself must still apply, so a failure is logged and stepped over rather
+    than aborting the switch.
+    """
+    from .firmware import _read as _fw_read, _supported as _fw_supported
+    from .firmware import _write as _fw_write
+
+    try:
+        if not _fw_supported("panel_overdrive"):
+            return
+        if _fw_read("panel_overdrive") is on:
+            return
+        _fw_write("panel_overdrive", on)
+    except Exception:
+        pass
 
 
 def _resolve_rate(mode, manual, backend):
@@ -594,14 +638,21 @@ class Z13DisplayPlugin(HHDPlugin):
 
         if new_rate is not None and new_rate != self.old_rate:
             self.old_rate = new_rate
-            set_rate(session, new_rate, backend, display)
+            # Overdrive is set on EVERY rate application, not only when
+            # entering the overdrive tier -- so leaving it turns the panel
+            # flag back off. Skipping the off-write would leave overdrive
+            # latched at 60 Hz, which is exactly the combination this tier
+            # exists to make unreachable, and the same shape as the frequency
+            # clamp that used to survive a switch back to Auto.
+            _apply_overdrive(new_rate == OVERDRIVE_RATE)
+            set_rate(session, _rate_hz(new_rate), backend, display)
             # A nested gamescope cannot follow the panel; bring its framerate
             # cap along instead. No-op when nothing nested is running. This
             # sits on the shared write path on purpose, so an automatic
             # AC-transition switch carries the cap along just like a manual
             # one does -- the game does not care which of the two moved it.
             if backend == "kscreen":
-                bridge_fps_limit(session, new_rate)
+                bridge_fps_limit(session, _rate_hz(new_rate))
             return
 
         now = time.monotonic()

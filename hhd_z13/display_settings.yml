@@ -65,9 +65,21 @@ z13_display:
                         # which breaks the string comparisons in display.py.
                         "60": 60 Hz
                         "180": 180 Hz
+                        # A tier ABOVE 180, not a separate axis: 180 Hz with panel
+                        # overdrive on. Modelled this way because overdrive's value
+                        # scales with refresh -- at 60 Hz a frame lasts 16.7 ms and
+                        # most pixel transitions finish unaided, while at 180 Hz they
+                        # have 5.6 ms and cannot. Making it a rung on the same ladder
+                        # also makes the bad combination unreachable: overdrive's
+                        # overshoot is tuned for the short frame, so holding it for a
+                        # 60 Hz frame is where inverse ghosting becomes visible.
+                        "overdrive": 180 Hz + Overdrive
                       hint: >-
                         A fixed rate, ignoring the power source. Only shown while the mode
-                        above is Manual.
+                        above is Manual. "180 Hz + Overdrive" runs 180 Hz and turns on
+                        panel overdrive, which speeds up pixel transitions to cut motion
+                        blur; the trade is possible overshoot ("inverse ghosting") on
+                        high-contrast edges. Selecting 60 or 180 turns it back off.
             vrr:
               type: multiple
               title: Adaptive Sync

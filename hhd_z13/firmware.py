@@ -1,9 +1,13 @@
 """z13_firmware -- ASUS firmware attributes for the ROG Flow Z13 (GZ302EA).
 
-Two booleans exposed by the asus-armoury firmware-attributes driver:
+Owns the asus-armoury firmware-attribute reads and writes, and exposes one
+control of its own:
 
-    panel_overdrive   LCD overdrive. Applies immediately.
     boot_sound        Power-on POST chime. Takes effect at the next cold boot.
+
+    panel_overdrive   LCD overdrive. Read/written here, but NOT a control
+                      here -- display.py surfaces it as the top tier of the
+                      Refresh Rate selector ("180 Hz + Overdrive").
 
 WRITTEN DIRECTLY TO SYSFS, NOT VIA z13ctl-plus
     z13ctl-plus has `paneloverdrive` and `bootsound` subcommands that do the
@@ -19,12 +23,18 @@ WRITTEN DIRECTLY TO SYSFS, NOT VIA z13ctl-plus
     write itself, which is the class of conflict the whole v0.2.0 release
     existed to close.
 
-WHY OVERDRIVE IS NOT COUPLED TO REFRESH RATE
-    G-Helper flips overdrive as a side effect of its refresh-rate switch.
-    Deliberately not copied. Overdrive trades motion blur for overshoot on
-    high-contrast edges, and whether that trade is worth it is a judgement
-    about content, not about Hz -- so it stays a setting you choose rather
-    than something a rate change alters behind your back.
+WHY OVERDRIVE IS A REFRESH TIER, NOT AN INDEPENDENT TOGGLE
+    It shipped briefly as its own switch here, on the reasoning that the
+    blur-vs-overshoot trade is a judgement about content rather than about
+    Hz. That undersold the physics. Overdrive's benefit scales with refresh
+    -- a 60 Hz frame lasts 16.7 ms and most pixel transitions finish unaided,
+    a 180 Hz frame gives them 5.6 ms and they cannot -- and its overshoot is
+    tuned for the short frame, so holding it across a long one is exactly
+    where inverse ghosting becomes visible.
+
+    Modelling it as the top rung of the Refresh Rate selector therefore makes
+    the useful combination one click and the harmful one unreachable. This is
+    what G-Helper does; the earlier decision to diverge was the wrong call.
 
 WHY THE VALUES ARE VALIDATED AGAINST possible_values
     The driver publishes what it accepts (`possible_values`, "0;1" here).
@@ -46,10 +56,10 @@ logger = logging.getLogger(__name__)
 ATTR_DIR = "/sys/class/firmware-attributes/asus-armoury/attributes"
 
 # (config leaf, attribute directory name)
-ATTRS = (
-    ("panel_overdrive", "panel_overdrive"),
-    ("boot_sound", "boot_sound"),
-)
+# Controls this plugin OWNS as settings. panel_overdrive is intentionally
+# absent: display.py drives it as a tier of the Refresh Rate selector, using
+# this module's _read/_write. It stays in ATTR checks below, not here.
+ATTRS = (("boot_sound", "boot_sound"),)
 
 
 def _attr_path(attr: str, leaf: str = "current_value") -> str:
@@ -97,7 +107,11 @@ class Z13FirmwarePlugin(HHDPlugin):
         self.name = "z13_firmware"
         self.priority = 9
         self.log = "z13f"
-        self.available = [a for _, a in ATTRS if _supported(a)]
+        # Probe overdrive too, so display.py can rely on this module having
+        # verified it, even though it is not a control here.
+        self.available = [
+            a for a in ("panel_overdrive", "boot_sound") if _supported(a)
+        ]
         self.old = {}
 
     def settings(self):
@@ -106,14 +120,11 @@ class Z13FirmwarePlugin(HHDPlugin):
         sets = load_relative_yaml("./firmware_settings.yml")
 
         out = {}
-        if "panel_overdrive" in self.available:
-            # Flattened into hhd's own Display container, beside the refresh
-            # controls -- see display.py's settings() for why a nested wrapper
-            # would render a redundant sub-header.
-            out.setdefault("gamemode", {})["display"] = {
-                "type": "container",
-                "children": sets["z13_panel_overdrive"],
-            }
+        # panel_overdrive is deliberately NOT a control here. It is a tier on
+        # the Refresh Rate selector in display.py ("180 Hz + Overdrive"),
+        # because its usefulness scales with refresh and pairing it with 60 Hz
+        # is the combination worth preventing. This module still owns the
+        # sysfs read/write; display.py calls in.
         if "boot_sound" in self.available:
             # Its own first-level container: a POST chime is not a display
             # setting, and at this level a title actually renders.
