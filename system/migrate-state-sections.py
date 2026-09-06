@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Move hhd-z13's stored settings under the containers they now mount into.
+"""Move hhd-z13's stored settings to wherever the plugins currently mount.
 
-    tdp.z13_cpu.*           ->  tdp.amd_energy.z13_cpu.*
-    gamemode.z13_display.*  ->  gamemode.display.z13_display.*
+Target (current): the controls are FLATTENED into the parent container, so
+stored values live directly beside the parent's own keys.
 
-Also handles the older orphan shape, if a machine skipped a step:
-
-    z13_cpu.root.*          ->  tdp.amd_energy.z13_cpu.*
-    z13_display.root.*      ->  gamemode.display.z13_display.*
+    tdp.amd_energy.z13_cpu.*          ->  tdp.amd_energy.*
+    gamemode.display.z13_display.*    ->  gamemode.display.*
 
 WHY THIS IS NEEDED
-    Config paths follow the mount point. The plugins now nest inside
-    adjustor's "Processor Settings" container and hhd's own "Display"
-    container, so stored values one level up are orphaned by the change --
-    hhd finds nothing at the new paths and writes the YAML defaults over them.
+    Config paths follow the mount point. The wrapper container was removed
+    because hhd only honours the hide-title tag at the FIRST level inside a
+    section -- nested one deeper it is transmitted and ignored, so the QAM
+    rendered "Processor Settings" and then "Z13 CPU" underneath it.
+
+    Dropping the wrapper orphans everything stored under it. Most of those
+    values are the "default" sentinel and would be harmless to lose, but not
+    all: pstate.active.epp is stored as balance_performance while the schema
+    default is balance_power, so without this hhd would write the default and
+    change the live EPP on the next start.
 
 WHY LINE-BASED RATHER THAN yaml.safe_load/dump
     state.yml carries a large auto-generated comment tree documenting every
@@ -27,28 +31,31 @@ import shutil
 import sys
 
 STATE = "/etc/hhd/state.yml"
-BAK = STATE + ".z13-container"
+BAK = STATE + ".z13-preflatten"
 
-# (key to move, destination section, destination container)
-MOVES = [
+# (wrapper key to dissolve, section, container it sits inside)
+UNWRAP = [
     ("z13_cpu", "tdp", "amd_energy"),
     ("z13_display", "gamemode", "display"),
 ]
 
 
-def block(lines, start, indent):
-    """End index of the block opened at `start` by a key at `indent`."""
+def indent_of(ln):
+    return len(ln) - len(ln.lstrip())
+
+
+def block_end(lines, start, indent):
+    """First line after `start` that closes a block opened at `indent`."""
     for j in range(start + 1, len(lines)):
         ln = lines[j]
         if not ln.strip() or ln.lstrip().startswith("#"):
             continue
-        if len(ln) - len(ln.lstrip()) <= indent:
+        if indent_of(ln) <= indent:
             return j
     return len(lines)
 
 
-def find_key(lines, span, key, indent):
-    """Index of `<indent>key:` within span, or None."""
+def find_at(lines, span, key, indent):
     want = " " * indent + key + ":"
     for i in range(*span):
         if lines[i].rstrip() == want:
@@ -63,60 +70,37 @@ def main():
 
     drop, inserts, did = set(), {}, []
 
-    for key, section, container in MOVES:
-        sec_at = find_key(lines, (0, len(lines)), section, 0)
-        if sec_at is None:
-            print(f"  ERROR: section '{section}:' not present, aborting")
+    for key, section, container in UNWRAP:
+        sec = find_at(lines, (0, len(lines)), section, 0)
+        if sec is None:
+            print(f"  ERROR: section '{section}:' missing, aborting")
             return 1
-        sec_span = (sec_at, block(lines, sec_at, 0))
+        sec_span = (sec, block_end(lines, sec, 0))
 
-        # already nested?
-        cont_at = find_key(lines, sec_span, container, 2)
-        if cont_at is not None:
-            cont_span = (cont_at, block(lines, cont_at, 2))
-            if find_key(lines, cont_span, key, 4) is not None:
-                print(f"  {section}.{container}.{key}: already migrated")
-                continue
+        cont = find_at(lines, sec_span, container, 2)
+        if cont is None:
+            print(f"  {section}.{container}: not present, skipping {key}")
+            continue
+        cont_span = (cont, block_end(lines, cont, 2))
 
-        # source: <section>.<key> at indent 2, or the old top-level orphan
-        src_at = find_key(lines, sec_span, key, 2)
-        if src_at is not None:
-            src_span = (src_at, block(lines, src_at, 2))
-            body = lines[src_at + 1 : src_span[1]]
-        else:
-            src_at = find_key(lines, (0, len(lines)), key, 0)
-            if src_at is None:
-                print(f"  {key}: nothing stored, skipping")
-                continue
-            src_span = (src_at, block(lines, src_at, 0))
-            body = [l for l in lines[src_at + 1 : src_span[1]] if l.strip()]
-            if not body or body[0].strip() != "root:":
-                print(f"  ERROR: {key}: expected 'root:', aborting")
-                return 1
-            body = body[1:]
+        wrap = find_at(lines, cont_span, key, 4)
+        if wrap is None:
+            print(f"  {section}.{container}.{key}: already flattened")
+            continue
+        wrap_span = (wrap, block_end(lines, wrap, 4))
 
-        # Children shift right by 2 to sit under a key that is itself one level
-        # deeper. Getting this wrong is silent in both directions: too little
-        # indent makes the children siblings of their own key (parses as
-        # `<key>: null`, losing every value), too much buries them below where
-        # the plugin reads.
-        moved = ["    " + key + ":"] + ["  " + l if l.strip() else l for l in body]
+        # Children sit at indent 6 under the wrapper and must end up at 4,
+        # level with the container's own keys. Dedent by exactly 2 -- too
+        # little and they stay inside a key that no longer exists, too much
+        # and they escape the container entirely.
+        body = [l for l in lines[wrap[0] if False else wrap + 1 : wrap_span[1]] if l.strip()]
+        moved = [l[2:] if l.startswith("  ") else l for l in body]
 
-        if cont_at is None:
-            # hhd only writes containers that hold stored values, so the
-            # destination may legitimately not exist yet -- create it.
-            moved = ["  " + container + ":"] + moved
-            anchor = sec_at
-            print(f"  {section}.{key}  ->  {section}.{container}.{key}"
-                  f"   (creating '{container}:', {len(body)} lines)")
-        else:
-            anchor = cont_at
-            print(f"  {section}.{key}  ->  {section}.{container}.{key}"
-                  f"   ({len(body)} lines)")
-
-        drop.update(range(*src_span))
-        inserts.setdefault(anchor, []).extend(moved)
+        drop.update(range(*wrap_span))
+        inserts.setdefault(cont, []).extend(moved)
         did.append(key)
+        print(f"  {section}.{container}.{key}.*  ->  {section}.{container}.*"
+              f"   ({len(moved)} lines)")
 
     if not did:
         print("  nothing to do")

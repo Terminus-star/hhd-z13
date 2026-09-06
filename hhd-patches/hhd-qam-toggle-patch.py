@@ -73,6 +73,7 @@ MARK = "z13-qam-toggle"
 MARK_VT = "z13-vt-gate"
 MARK_ONESHOT = "z13-oneshot"
 MARK_CPU = "z13-cpu-disable-native"
+MARK_AC = "z13-ac-backport"
 
 
 def find_overlay_dir():
@@ -101,6 +102,14 @@ def find_adjustor_fuse():
     hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/fuse/gpu.py"))
     if not hits:
         sys.exit("ERROR: adjustor/fuse/gpu.py not found (is adjustor installed?)")
+    return hits[-1]
+
+
+def find_hhd_utils():
+    """hhd/utils.py, which owns the AC-status read. Full file path."""
+    hits = sorted(glob.glob("/usr/lib/python3*/site-packages/hhd/utils.py"))
+    if not hits:
+        sys.exit("ERROR: hhd/utils.py not found (is hhd installed?)")
     return hits[-1]
 
 
@@ -516,17 +525,82 @@ ADJUSTOR_FUSE_PATCHES = (
 )
 
 
-def apply_marked(p, table):
-    """Apply a table of independently-sentinelled edits to one file."""
+# Backport of hhd's own AC-status fix, so this machine gets it on 4.1.12.
+#
+# 4.1.12 resolves the AC ADAPTER's `online` file (contents "0"/"1") but then
+# compares its contents against "Discharging" -- a string that lives in
+# BAT0/status, a different device's file. The comparison is never equal, so
+# get_ac_status() returns True unconditionally and info["ac"] has been True on
+# every machine since the function was introduced. Verified here: AC0/online
+# reads 0 with the battery discharging while hhd logs "AC status is: True".
+#
+# Wrong from its first commit (2cb50e8, 2024-10-17) until d609ada (2026-08-07,
+# "move ac/dc handling to main"), i.e. ~22 months, and v4.1.12 predates the
+# fix. The replacement below is upstream's own implementation copied verbatim
+# -- deliberately NOT a local variant -- so that upgrading to a release which
+# contains d609ada is a clean no-op rather than a conflict, and so nothing
+# here has to be rewritten if it is ever contributed back.
+#
+# hhd_z13 does NOT rely on this: _on_ac() reads sysfs itself and stays the
+# authority until the fix is confirmed working. This only repairs the signal
+# for anything else that might read it.
+UTILS_PATCHES = (
+    (
+        "ac-status",
+        # The WHOLE try/except is the anchor, not just the buggy line: d609ada
+        # also added error logging to the except arm, and matching upstream
+        # exactly is the entire point of doing this as a backport.
+        '    try:\n'
+        '        with open(fn) as f:\n'
+        '            return f.read().strip() != "Discharging"\n'
+        '    except Exception as e:\n'
+        '        return None\n',
+        """\
+    # {mark}: upstream d609ada, verbatim. The replaced line compared this
+    # file's contents against "Discharging", which belongs to BAT0/status --
+    # a different device -- so it never matched and always returned True.
+    try:
+        with open(fn) as f:
+            status = f.read().strip()
+        if status == "1":
+            return True
+        if status == "0":
+            return False
+        logger.error(f"Invalid AC status '{{status}}' read from '{{fn}}'.")
+        return None
+    except Exception as e:
+        logger.error(f"Could not read AC status file '{{fn}}', error:\\n{{e}}")
+        return None
+""",
+        "z13-ac-backport",
+        "replace",
+    ),
+)
+
+
+def apply_marked(p, table, mark=None):
+    """Apply a table of independently-sentinelled edits to one file.
+
+    Entries are (label, anchor, repl, sentinel) which INSERTS repl after the
+    anchor, or (label, anchor, repl, sentinel, "replace") which substitutes
+    repl FOR the anchor. Insert is the default because most of these disable a
+    line by adding an override below it, where the original stays as a record
+    of what upstream does. Replace exists for the cases where leaving the
+    original in place would still execute it -- a `return` being the obvious
+    one, since anything appended after it is unreachable.
+    """
     s = read(p)
     applied, already = [], []
-    for label, anchor, repl, sentinel in table:
+    for entry in table:
+        label, anchor, repl, sentinel = entry[:4]
+        mode = entry[4] if len(entry) > 4 else "insert"
         if sentinel in s:
             already.append(label)
             continue
         if anchor not in s:
-            return None, f"anchor missing for {label} (adjustor internals changed)"
-        s = s.replace(anchor, anchor + repl.format(mark=MARK_CPU), 1)
+            return None, f"anchor missing for {label} (upstream internals changed)"
+        body = repl.format(mark=mark or MARK_CPU)
+        s = s.replace(anchor, body if mode == "replace" else anchor + body, 1)
         applied.append(label)
     if not applied:
         return False, f"already patched ({', '.join(already)})"
@@ -544,7 +618,8 @@ def marked_state(p, table):
     cpufreq, and a mark-only check would have shown it as done.
     """
     s = read(p)
-    missing = [l for l, _, _, sen in table if sen not in s]
+    # entry[:4] because entries may carry a 5th "replace" mode field
+    missing = [e[0] for e in table if e[3] not in s]
     if not missing:
         return "PATCHED"
     if len(missing) == len(table):
@@ -587,7 +662,8 @@ def main():
     d = find_overlay_dir()
     a_gpu = find_adjustor_gpu()
     a_fuse = find_adjustor_fuse()
-    adj = (a_gpu, a_fuse)
+    a_utils = find_hhd_utils()
+    adj = (a_gpu, a_fuse, a_utils)
     mode = sys.argv[1] if len(sys.argv) > 1 else "--apply"
 
     if mode == "--check":
@@ -607,6 +683,7 @@ def main():
             ("adjustor/fuse", a_fuse, ADJUSTOR_FUSE_PATCHES),
         ):
             print(f"  {disp:14s} {'cpu-native':12s} {marked_state(path, table)}")
+        print(f"  {'hhd/utils.py':14s} {'ac-backport':12s} {marked_state(a_utils, UTILS_PATCHES)}")
         return
 
     if mode == "--revert":
@@ -629,6 +706,7 @@ def main():
         ("x11.py/vt-gate", patch_x11, d),
         ("adjustor/gpu", lambda p: apply_marked(p, ADJUSTOR_GPU_PATCHES), a_gpu),
         ("adjustor/fuse", lambda p: apply_marked(p, ADJUSTOR_FUSE_PATCHES), a_fuse),
+        ("hhd/utils.py", lambda p: apply_marked(p, UTILS_PATCHES, MARK_AC), a_utils),
     ):
         ok, msg = fn(arg)
         results.append((name, ok, msg))
