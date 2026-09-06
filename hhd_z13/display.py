@@ -531,14 +531,16 @@ class Z13DisplayPlugin(HHDPlugin):
         # Same merge contract as plugin.py: "type": "container" is required for
         # merge_reduce() to union children, and "title" is omitted so hhd's own
         # "Display" survives rather than being overwritten by ours.
-        return {
-            "gamemode": {
-                "display": {
-                    "type": "container",
-                    "children": {"z13_display": sets["z13_display"]},
-                }
-            }
-        }
+        # FLATTENED -- see plugin.py's settings() for why: hide-title only
+        # applies at the first level inside a section, so a nested wrapper
+        # rendered "Display" and then "Z13 Display" beneath it. The controls
+        # become direct siblings of hhd's own touchscreen toggles instead.
+        children = sets["z13_display"]["children"]
+        for c in children.values():
+            tags = c.setdefault("tags", [])
+            if "non-essential" not in tags:
+                tags.append("non-essential")
+        return {"gamemode": {"display": {"type": "container", "children": children}}}
 
     def update(self, conf: Config):
         available, reason, session, backend, display = check_availability()
@@ -547,9 +549,9 @@ class Z13DisplayPlugin(HHDPlugin):
         if new_status != self.old_status or backend != self.old_backend:
             self.old_status = new_status
             self.old_backend = backend
-            conf["gamemode.display.z13_display.status.mode"] = new_status
+            conf["gamemode.display.status.mode"] = new_status
             if not available:
-                conf["gamemode.display.z13_display.status.unavailable.reason"] = (
+                conf["gamemode.display.status.unavailable.reason"] = (
                     reason or "No usable KDE Wayland session detected."
                 )
             # A transition either way invalidates any prior agreement on the
@@ -567,9 +569,9 @@ class Z13DisplayPlugin(HHDPlugin):
         # the target WITHOUT the setting itself changing -- which is the whole
         # point of the option, and the reason the comparison below is against
         # the resolved rate rather than the config value.
-        rate_mode = conf["gamemode.display.z13_display.status.available.refresh_rate.mode"].to(str)
+        rate_mode = conf["gamemode.display.status.available.refresh_rate.mode"].to(str)
         rate_manual = conf[
-            "gamemode.display.z13_display.status.available.refresh_rate.manual.rate"
+            "gamemode.display.status.available.refresh_rate.manual.rate"
         ].to(str)
         new_rate = _resolve_rate(rate_mode, rate_manual, backend)
 
@@ -586,7 +588,7 @@ class Z13DisplayPlugin(HHDPlugin):
                 # whatever the panel happened to be showing at startup.
                 if rate_mode == "manual":
                     conf[
-                        "gamemode.display.z13_display.status.available.refresh_rate.manual.rate"
+                        "gamemode.display.status.available.refresh_rate.manual.rate"
                     ] = live
             return
 
@@ -619,7 +621,7 @@ class Z13DisplayPlugin(HHDPlugin):
             if live is not None and live != self.old_rate:
                 self.old_rate = live
                 conf[
-                    "gamemode.display.z13_display.status.available.refresh_rate.manual.rate"
+                    "gamemode.display.status.available.refresh_rate.manual.rate"
                 ] = live
                 # Someone changed the rate outside hhd (KDE display settings, a
                 # script). The bridge applies the same either way.
@@ -632,13 +634,13 @@ class Z13DisplayPlugin(HHDPlugin):
         if backend != "kscreen":
             return
 
-        new_vrr = conf["gamemode.display.z13_display.status.available.vrr"].to(str)
+        new_vrr = conf["gamemode.display.status.available.vrr"].to(str)
 
         if self.old_vrr is None:
             live_vrr = read_vrr(session)
             if live_vrr is not None:
                 self.old_vrr = live_vrr
-                conf["gamemode.display.z13_display.status.available.vrr"] = live_vrr
+                conf["gamemode.display.status.available.vrr"] = live_vrr
             return
 
         if new_vrr != self.old_vrr:
@@ -649,4 +651,4 @@ class Z13DisplayPlugin(HHDPlugin):
         live_vrr = read_vrr(session)
         if live_vrr is not None and live_vrr != self.old_vrr:
             self.old_vrr = live_vrr
-            conf["gamemode.display.z13_display.status.available.vrr"] = live_vrr
+            conf["gamemode.display.status.available.vrr"] = live_vrr

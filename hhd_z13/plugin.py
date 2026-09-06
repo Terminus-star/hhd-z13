@@ -491,35 +491,44 @@ class Z13CpuPlugin(HHDPlugin):
         # as b.get(tag, a.get(tag, default)) -- so supplying a title here would
         # overwrite adjustor's "Processor Settings", while omitting it inherits
         # theirs whichever order the two plugins merge in.
-        return {
-            "tdp": {
-                "amd_energy": {
-                    "type": "container",
-                    "children": {"z13_cpu": sets["z13_cpu"]},
-                }
-            }
-        }
+        # FLATTENED into adjustor's container rather than nested as a child
+        # container of our own. hide-title is only honoured at the FIRST level
+        # inside a section -- every upstream use of it (amd_energy, asus, msi,
+        # aura, rgb) sits exactly there. One level deeper the tag is still
+        # transmitted (confirmed over the API) and simply ignored, so the QAM
+        # rendered "Processor Settings" and then "Z13 CPU" underneath it. No
+        # tag fixes that; the wrapper itself has to go.
+        #
+        # The wrapper also carried non-essential for the whole group, so push
+        # it onto each child -- otherwise flattening would silently promote
+        # these controls into the essential view.
+        children = sets["z13_cpu"]["children"]
+        for c in children.values():
+            tags = c.setdefault("tags", [])
+            if "non-essential" not in tags:
+                tags.append("non-essential")
+        return {"tdp": {"amd_energy": {"type": "container", "children": children}}}
 
     def update(self, conf: Config):
-        new_pstate = conf["tdp.amd_energy.z13_cpu.pstate.mode"].to(str)
-        new_perf = conf["tdp.amd_energy.z13_cpu.perf_mode"].to(bool)
+        new_pstate = conf["tdp.amd_energy.pstate.mode"].to(str)
+        new_perf = conf["tdp.amd_energy.perf_mode"].to(bool)
         # The control is nested under the mode that owns it, so the path
         # follows the selection rather than a key fixed at startup.
         pref_path = (
-            "tdp.amd_energy.z13_cpu.pstate.active.epp"
+            "tdp.amd_energy.pstate.active.epp"
             if new_pstate == "active"
-            else f"tdp.amd_energy.z13_cpu.pstate.{new_pstate}.governor"
+            else f"tdp.amd_energy.pstate.{new_pstate}.governor"
         )
         new_epp = conf[pref_path].to(str)
         # Resolved, not raw: in "auto" this follows the power source, so an
         # AC transition changes the target without the setting changing. The
         # comparison below is against the resolved value for that reason.
-        boost_mode = conf["tdp.amd_energy.z13_cpu.boost.mode"].to(str)
-        boost_manual = conf["tdp.amd_energy.z13_cpu.boost.manual.enabled"].to(bool)
+        boost_mode = conf["tdp.amd_energy.boost.mode"].to(str)
+        boost_manual = conf["tdp.amd_energy.boost.manual.enabled"].to(bool)
         new_boost = _resolve_boost(boost_mode, boost_manual)
-        new_freq_mode = conf["tdp.amd_energy.z13_cpu.freq_mode.mode"].to(str)
-        new_min_freq = conf["tdp.amd_energy.z13_cpu.freq_mode.manual.min_freq"].to(int)
-        new_max_freq = conf["tdp.amd_energy.z13_cpu.freq_mode.manual.max_freq"].to(int)
+        new_freq_mode = conf["tdp.amd_energy.freq_mode.mode"].to(str)
+        new_min_freq = conf["tdp.amd_energy.freq_mode.manual.min_freq"].to(int)
+        new_max_freq = conf["tdp.amd_energy.freq_mode.manual.max_freq"].to(int)
 
         # amd_pstate mode first: it decides which of the controls below even
         # exist, so applying it before them avoids writing a governor to an
@@ -533,7 +542,7 @@ class Z13CpuPlugin(HHDPlugin):
             live_mode = _pstate_mode()
             if live_mode in PSTATE_MODES:
                 self.old_pstate = live_mode
-                conf["tdp.amd_energy.z13_cpu.pstate.mode"] = live_mode
+                conf["tdp.amd_energy.pstate.mode"] = live_mode
         elif new_pstate != self.old_pstate:
             self.old_pstate = new_pstate
             _apply_pstate(new_pstate)
@@ -592,7 +601,7 @@ class Z13CpuPlugin(HHDPlugin):
             if new_freq_mode == "manual":
                 if new_perf:
                     _apply_perf(self, False)
-                    conf["tdp.amd_energy.z13_cpu.perf_mode"] = False
+                    conf["tdp.amd_energy.perf_mode"] = False
                     self.old_perf = False
                     # --save already re-set EPP+Boost as part of its unit;
                     # adopt the current slider values as "already applied"
@@ -604,11 +613,11 @@ class Z13CpuPlugin(HHDPlugin):
                 if live is not None:
                     if live.get("min_frequency_khz") is not None:
                         v = round(live["min_frequency_khz"] / 1000)
-                        conf["tdp.amd_energy.z13_cpu.freq_mode.manual.min_freq"] = v
+                        conf["tdp.amd_energy.freq_mode.manual.min_freq"] = v
                         self.old_min_freq = v
                     if live.get("max_frequency_khz") is not None:
                         v = round(live["max_frequency_khz"] / 1000)
-                        conf["tdp.amd_energy.z13_cpu.freq_mode.manual.max_freq"] = v
+                        conf["tdp.amd_energy.freq_mode.manual.max_freq"] = v
                         self.old_max_freq = v
                 # else: live read failed. Leave old_min_freq/old_max_freq and
                 # the sliders as they were -- the ordinary reconciliation
@@ -714,7 +723,7 @@ class Z13CpuPlugin(HHDPlugin):
             live_boost = bool(live["boost"])
             if live_boost != boost_manual:
                 self.old_boost = live_boost
-                conf["tdp.amd_energy.z13_cpu.boost.manual.enabled"] = live_boost
+                conf["tdp.amd_energy.boost.manual.enabled"] = live_boost
 
         # Gated the same as the write side above: outside "manual" the
         # sliders are hidden, so there is nothing useful to reconcile them
@@ -726,10 +735,10 @@ class Z13CpuPlugin(HHDPlugin):
                 live_min = round(live["min_frequency_khz"] / 1000)
                 if live_min != self.old_min_freq:
                     self.old_min_freq = live_min
-                    conf["tdp.amd_energy.z13_cpu.freq_mode.manual.min_freq"] = live_min
+                    conf["tdp.amd_energy.freq_mode.manual.min_freq"] = live_min
 
             if live.get("max_frequency_khz") is not None:
                 live_max = round(live["max_frequency_khz"] / 1000)
                 if live_max != self.old_max_freq:
                     self.old_max_freq = live_max
-                    conf["tdp.amd_energy.z13_cpu.freq_mode.manual.max_freq"] = live_max
+                    conf["tdp.amd_energy.freq_mode.manual.max_freq"] = live_max
