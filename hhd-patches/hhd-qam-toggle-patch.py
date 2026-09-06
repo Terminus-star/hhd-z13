@@ -632,8 +632,8 @@ ADJUSTOR_ASUS_PATCHES = (
                 # exactly. Ordering (PL1 <= PL2 <= PL3) is enforced by the
                 # producer, because the firmware rejects a lower tier that
                 # exceeds a higher one rather than clamping it.
-                _z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)
-                _z13_f = conf.get("tdp.asus.z13_presets.fppt", 0)
+                _z13_s = conf.get("tdp.asus.tdp_v2.custom.z13_sppt", 0)
+                _z13_f = conf.get("tdp.asus.tdp_v2.custom.z13_fppt", 0)
                 if _z13_s and _z13_f:
                     time.sleep(TDP_DELAY)
                     set_tdp("fast", FTDP_FN, _z13_f)
@@ -643,7 +643,7 @@ ADJUSTOR_ASUS_PATCHES = (
                     set_tdp("steady", CTDP_FN, steady)
                 elif boost:
 """,
-        '_z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)',
+        '_z13_s = conf.get("tdp.asus.tdp_v2.custom.z13_sppt", 0)',
         "replace",
     ),
     (

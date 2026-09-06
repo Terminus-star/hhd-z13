@@ -115,21 +115,26 @@ FPPT_RATIO = FW_PL3 / FW_PL1        # 1.4333...
 MAX_SPPT = 92
 MAX_FPPT = 93
 
+# Everything lives inside adjustor's own Custom mode rather than beside it,
+# so the presets have one home instead of a second concurrent menu. Values in
+# non-selected modes are still stored and readable -- hhd only hides them from
+# the UI -- so the power-change policy below keeps working from any mode even
+# though it is only visible under Custom.
 BASE = "tdp.asus"
 MODE_PATH = f"{BASE}.tdp_v2.mode"
-CUSTOM_TDP = f"{BASE}.tdp_v2.custom.tdp"
-CUSTOM_BOOST = f"{BASE}.tdp_v2.custom.boost"
-PRESETS = f"{BASE}.z13_presets"
-ACTIVE = f"{PRESETS}.active.mode"
-COUNT = f"{PRESETS}.count"
-ADD = f"{PRESETS}.add"
-REMOVE = f"{PRESETS}.remove"
-SPPT = f"{PRESETS}.sppt"
-FPPT = f"{PRESETS}.fppt"
-AUTO = f"{BASE}.z13_tdp_auto"
-STATUS = f"{BASE}.z13_tdp_status"
+CUSTOM = f"{BASE}.tdp_v2.custom"
+CUSTOM_TDP = f"{CUSTOM}.tdp"
+CUSTOM_BOOST = f"{CUSTOM}.boost"
+ACTIVE = f"{CUSTOM}.z13_active.mode"
+COUNT = f"{CUSTOM}.z13_count"
+ADD = f"{CUSTOM}.z13_add"
+REMOVE = f"{CUSTOM}.z13_remove"
+SPPT = f"{CUSTOM}.z13_sppt"
+FPPT = f"{CUSTOM}.z13_fppt"
+AUTO = f"{CUSTOM}.z13_auto"
+STATUS = f"{CUSTOM}.z13_status"
 
-PATCH_SENTINEL = '_z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)'
+PATCH_SENTINEL = '_z13_s = conf.get("tdp.asus.tdp_v2.custom.z13_sppt", 0)'
 ADJUSTOR_ASUS_GLOB = "/usr/lib/python3*/site-packages/adjustor/drivers/asus/__init__.py"
 PATCH_WARNING = (
     "Manual PL2/PL3 needs the adjustor patch — run hhd-patches/install.sh"
@@ -192,6 +197,7 @@ class Z13TdpPlugin(HHDPlugin):
 
         sets = load_relative_yaml("./tdp_settings.yml")
         n = _clamp(self._count, MIN_PRESETS, MAX_PRESETS)
+        kids = sets["z13_custom_children"]
 
         # deepcopy per slot: a YAML alias would make every preset the same
         # dict object, and the tree is walked and annotated in several places.
@@ -201,10 +207,9 @@ class Z13TdpPlugin(HHDPlugin):
             c["title"] = f"Preset {i}"
             modes[_pid(i)] = c
 
-        node = sets["z13_presets"]
-        node["children"]["active"]["modes"] = modes
-        node["children"]["active"]["default"] = _pid(1)
-        node["children"]["count"]["default"] = n
+        kids["z13_active"]["modes"] = modes
+        kids["z13_active"]["default"] = _pid(1)
+        kids["z13_count"]["default"] = n
 
         # Presets first, then the stock profiles -- the same order they appear
         # in adjustor's own dropdown reads oddly here, and "my presets, then
@@ -212,7 +217,7 @@ class Z13TdpPlugin(HHDPlugin):
         opts = {_pid(i): f"Preset {i}" for i in range(1, n + 1)}
         opts.update({k: STOCK_LABELS[k] for k in STOCK_MODES})
 
-        auto = sets["z13_tdp_auto"]
+        auto = kids["z13_auto"]
         ac = auto["modes"]["enabled"]["children"]["ac_preset"]
         dc = auto["modes"]["enabled"]["children"]["dc_preset"]
         ac["options"] = dict(opts)
@@ -220,17 +225,33 @@ class Z13TdpPlugin(HHDPlugin):
         ac["default"] = _pid(1)
         dc["default"] = _pid(min(2, n))
 
+        # adjustor's own tdp/boost sliders drive the same two values the
+        # active preset does, so showing both would stack two TDP sliders in
+        # one menu. Override ONLY their tags -- pick_tag takes tags from
+        # whoever merges last, and everything else (type, min, max, default,
+        # title) falls through from adjustor's definition because it is
+        # omitted here. This is a merge, not a patch: disable this plugin and
+        # the sliders come straight back.
+        kids["tdp"] = {"tags": ["hide"]}
+        kids["boost"] = {"tags": ["hide"]}
+
         return {
             "tdp": {
                 "asus": {
-                    # `type` required or merge_reduce refuses to union and the
-                    # contribution is silently dropped. Title omitted so
-                    # adjustor's "Asus TDP" survives pick_tag.
+                    # `type` required at EVERY level or merge_reduce refuses to
+                    # union and the contribution is silently dropped. Titles
+                    # omitted so adjustor's own survive pick_tag.
                     "type": "container",
                     "children": {
-                        "z13_presets": node,
-                        "z13_tdp_auto": auto,
-                        "z13_tdp_status": sets["z13_tdp_status"],
+                        "tdp_v2": {
+                            "type": "mode",
+                            "modes": {
+                                "custom": {
+                                    "type": "container",
+                                    "children": kids,
+                                }
+                            },
+                        }
                     },
                 }
             }
@@ -238,7 +259,7 @@ class Z13TdpPlugin(HHDPlugin):
 
     # ── reading a preset ──────────────────────────────────────────────────
     def _values(self, conf: Config, pid: str):
-        base = f"{PRESETS}.active.{pid}"
+        base = f"{CUSTOM}.z13_active.{pid}"
         watts = _clamp(conf[f"{base}.tdp"].to(int), MIN_TDP, MAX_TDP)
         boost = conf[f"{base}.boost"].to(bool)
 
@@ -295,7 +316,7 @@ class Z13TdpPlugin(HHDPlugin):
 
     def _apply_active(self, conf: Config):
         pid = conf[ACTIVE].to(str)
-        if f"{PRESETS}.active.{pid}.tdp" not in conf:
+        if f"{CUSTOM}.z13_active.{pid}.tdp" not in conf:
             return  # mid-rebuild, or a stale selection
         vals = self._values(conf, pid)
         sig = (pid, *vals)
@@ -342,7 +363,7 @@ class Z13TdpPlugin(HHDPlugin):
             conf[MODE_PATH] = target
             return
 
-        if f"{PRESETS}.active.{target}.tdp" not in conf:
+        if f"{CUSTOM}.z13_active.{target}.tdp" not in conf:
             return  # a preset that no longer exists
         logger.info(f"Power source -> {where}: preset -> {target}")
         conf[ACTIVE] = target
@@ -372,8 +393,8 @@ class Z13TdpPlugin(HHDPlugin):
             # is rebuilt and survives into it.
             src = conf[ACTIVE].to(str)
             dst = _pid(new)
-            base_src = f"{PRESETS}.active.{src}"
-            base_dst = f"{PRESETS}.active.{dst}"
+            base_src = f"{CUSTOM}.z13_active.{src}"
+            base_dst = f"{CUSTOM}.z13_active.{dst}"
             if f"{base_src}.tdp" in conf:
                 for leaf in ("tdp", "boost", "ppt.mode",
                              "ppt.manual.sppt", "ppt.manual.fppt"):

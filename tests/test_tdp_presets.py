@@ -52,17 +52,20 @@ def mkconf(mode="balanced", auto="disabled", ac="p1", dc="p2", active="p1",
     slots = slots or {"p1": slot(45), "p2": slot(20)}
     return Config({
         "tdp": {"asus": {
-            "tdp_v2": {"mode": mode, "custom": {"tdp": 45, "boost": True}},
-            "z13_presets": {
-                "active": {"mode": active, **slots},
-                "count": count, "add": False, "remove": False,
-                "sppt": 0, "fppt": 0,
-            },
-            "z13_tdp_auto": {
-                "mode": auto,
-                "enabled": {"ac_preset": ac, "dc_preset": dc},
-            },
-            "z13_tdp_status": "",
+            "tdp_v2": {"mode": mode, "custom": {
+                # adjustor's own two, which the preset writes into and which
+                # are hidden from the UI so they do not duplicate its sliders
+                "tdp": 45, "boost": True,
+                # ours, merged in beside them
+                "z13_active": {"mode": active, **slots},
+                "z13_count": count, "z13_add": False, "z13_remove": False,
+                "z13_sppt": 0, "z13_fppt": 0,
+                "z13_auto": {
+                    "mode": auto,
+                    "enabled": {"ac_preset": ac, "dc_preset": dc},
+                },
+                "z13_status": "",
+            }},
         }},
         "hhd": {"settings": {"tdp_ready": True}},
     })
@@ -72,8 +75,8 @@ def mkconf(mode="balanced", auto="disabled", ac="p1", dc="p2", active="p1",
 # 1. The generated tree
 # ==========================================================================
 s = plugin(count=3).settings()
-node = s["tdp"]["asus"]["children"]["z13_presets"]
-modes = node["children"]["active"]["modes"]
+kids = s["tdp"]["asus"]["children"]["tdp_v2"]["modes"]["custom"]["children"]
+modes = kids["z13_active"]["modes"]
 ok(sorted(modes) == ["p1", "p2", "p3"], f"count drives the slot list ({sorted(modes)})")
 ok(modes["p2"]["title"] == "Preset 2", f"slots are titled ({modes['p2']['title']!r})")
 
@@ -90,7 +93,7 @@ ok(sorted(pt["ppt"]["modes"]) == ["auto", "manual"], "PL2/PL3 have an auto/manua
 ok(sorted(pt["ppt"]["modes"]["manual"]["children"]) == ["fppt", "sppt"],
    "manual exposes PL2 and PL3")
 
-opts = s["tdp"]["asus"]["children"]["z13_tdp_auto"]["modes"]["enabled"]["children"]["ac_preset"]["options"]
+opts = kids["z13_auto"]["modes"]["enabled"]["children"]["ac_preset"]["options"]
 ok(sorted(opts) == ["balanced", "p1", "p2", "p3", "performance", "quiet"],
    f"power-change targets are presets + stock profiles ({sorted(opts)})")
 # adjustor's keys and titles disagree; using its titles avoids two different
@@ -113,7 +116,28 @@ if hits:
        f"adjustor's dropdown is UNTOUCHED -- no preset modes ({sorted(tv['modes'])})")
     ok("tdp" in tv["modes"]["custom"]["children"], "the mirror target still exists")
     ok("fan" in asus["children"], "adjustor's fan curve survives")
-    ok("z13_presets" in asus["children"], "our preset container merged in")
+    cust = tv["modes"]["custom"]["children"]
+    ok("z13_active" in cust, "presets merged INSIDE Custom, not beside it")
+    ok("z13_presets" not in asus["children"],
+       "no second concurrent menu at the container level")
+    # adjustor's own sliders drive the same two values the active preset does,
+    # so both showing would stack two TDP sliders in one menu. Tags are
+    # overridden through the merge; everything else falls through from
+    # adjustor, which is what keeps this a merge rather than a patch.
+    ok("hide" in cust["tdp"].get("tags", []),
+       f"adjustor's duplicate TDP slider is hidden ({cust['tdp'].get('tags')})")
+    ok("hide" in cust["boost"].get("tags", []),
+       f"adjustor's duplicate boost toggle is hidden ({cust['boost'].get('tags')})")
+    # Bounds must come from adjustor's definition, untouched. Note these are
+    # its YAML PLACEHOLDERS -- it overwrites them at runtime inside settings()
+    # from Z1_DATA, giving the real 5..65 -- which is exactly why this compares
+    # against adjustor's own file rather than a hardcoded pair.
+    raw = yaml.safe_load(open(hits[-1]))["children"]["tdp_v2"]["modes"]["custom"]["children"]["tdp"]
+    ok(cust["tdp"].get("min") == raw["min"] and cust["tdp"].get("max") == raw["max"],
+       f"and keeps adjustor's own bounds, untouched "
+       f"({cust['tdp'].get('min')}..{cust['tdp'].get('max')})")
+    ok(cust["tdp"].get("title") == raw.get("title"),
+       f"and its title ({cust['tdp'].get('title')!r})")
 else:
     print("  SKIP  adjustor not installed (merge checks)")
 
@@ -127,7 +151,7 @@ p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "balanced",
    "first tick adopts and applies nothing (hhd starting must not change TDP)")
 
-c["tdp.asus.z13_presets.active.p1.tdp"] = 9
+c["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 9
 p.prepare(c)
 ok(c[t.CUSTOM_TDP].to(int) == 9, f"editing a preset applies it ({c[t.CUSTOM_TDP].to(int)})")
 ok(c[t.MODE_PATH].to(str) == "custom", "and selects adjustor's Custom mode")
@@ -142,14 +166,14 @@ ok((c[t.SPPT].to(int), c[t.FPPT].to(int)) == (11, 13),
 p_ = plugin()
 c_ = mkconf(active="p1", slots={"p1": slot(20), "p2": slot(20)})
 p_.prepare(c_)
-c_["tdp.asus.z13_presets.active.p1.tdp"] = 45
+c_["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 45
 p_.prepare(c_)
 ok((c_[t.CUSTOM_TDP].to(int), c_[t.SPPT].to(int), c_[t.FPPT].to(int)) == (45, 56, 64),
    f"45 W yields real headroom, not 45/45/45 "
    f"({c_[t.CUSTOM_TDP].to(int)}/{c_[t.SPPT].to(int)}/{c_[t.FPPT].to(int)})")
 
 # Ceilings are the firmware's own max_value figures.
-c_["tdp.asus.z13_presets.active.p1.tdp"] = 65
+c_["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 65
 p_.prepare(c_)
 ok(c_[t.SPPT].to(int) <= t.MAX_SPPT and c_[t.FPPT].to(int) <= t.MAX_FPPT,
    f"capped at the firmware maxima "
@@ -159,7 +183,7 @@ ok(c_[t.SPPT].to(int) <= t.MAX_SPPT and c_[t.FPPT].to(int) <= t.MAX_FPPT,
 p_ = plugin()
 c_ = mkconf(active="p1", slots={"p1": slot(45, boost=False), "p2": slot(20)})
 p_.prepare(c_)
-c_["tdp.asus.z13_presets.active.p1.tdp"] = 46
+c_["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 46
 p_.prepare(c_)
 ok(c_[t.SPPT].to(int) == 46 and c_[t.FPPT].to(int) == 46,
    f"boost off gives one flat limit ({c_[t.SPPT].to(int)}, {c_[t.FPPT].to(int)})")
@@ -181,7 +205,7 @@ p = plugin()
 c = mkconf(active="p1", slots={"p1": slot(30, ppt="manual", sppt=50, fppt=70),
                                "p2": slot(20)})
 p.prepare(c)
-c["tdp.asus.z13_presets.active.p1.tdp"] = 31
+c["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 31
 p.prepare(c)
 ok((c[t.SPPT].to(int), c[t.FPPT].to(int)) == (50, 70),
    f"manual limits are published verbatim ({c[t.SPPT].to(int)}, {c[t.FPPT].to(int)})")
@@ -192,7 +216,7 @@ p = plugin()
 c = mkconf(active="p1", slots={"p1": slot(60, ppt="manual", sppt=10, fppt=5),
                                "p2": slot(20)})
 p.prepare(c)
-c["tdp.asus.z13_presets.active.p1.tdp"] = 61
+c["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 61
 p.prepare(c)
 w, sp, fp = c[t.CUSTOM_TDP].to(int), c[t.SPPT].to(int), c[t.FPPT].to(int)
 ok(w <= sp <= fp, f"PL1 <= PL2 <= PL3 is enforced before writing ({w}, {sp}, {fp})")
@@ -213,7 +237,7 @@ ok(c[t.MODE_PATH].to(str) == "balanced", "first tick adopts the power source onl
 
 with_ac(False)
 p.prepare(c)
-ok(c["tdp.asus.z13_presets.active.mode"].to(str) == "p2",
+ok(c["tdp.asus.tdp_v2.custom.z13_active.mode"].to(str) == "p2",
    f"unplugging selects the battery preset ({c[t.ACTIVE].to(str)})")
 ok(c[t.CUSTOM_TDP].to(int) == 20, f"and applies it ({c[t.CUSTOM_TDP].to(int)})")
 ok(c[t.MODE_PATH].to(str) == "custom", "and selects Custom")
@@ -260,7 +284,7 @@ p.update(c)
 ok(c[t.COUNT].to(int) == 3, f"Add grows the list ({c[t.COUNT].to(int)})")
 ok(any(e.get("type") == "settings" for e in p.events),
    "and asks hhd to rebuild the tree (the list is fixed at settings() time)")
-ok(c["tdp.asus.z13_presets.active.p3.tdp"].to(int) == 9,
+ok(c["tdp.asus.tdp_v2.custom.z13_active.p3.tdp"].to(int) == 9,
    "a new slot is seeded from the active one, not from a default nobody chose")
 
 p = plugin(count=2)

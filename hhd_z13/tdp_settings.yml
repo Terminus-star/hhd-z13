@@ -1,25 +1,35 @@
-# User-created TDP presets, applied through adjustor's OWN Custom mode.
+# User-created TDP presets, living INSIDE adjustor's own Custom mode.
+#
+# WHERE THIS RENDERS
+#   Everything here merges into tdp.asus.tdp_v2.modes.custom.children, so the
+#   presets appear under "Custom" in adjustor's TDP Mode dropdown rather than
+#   as a second menu beside it. Selecting Custom is selecting the presets.
+#
+#   adjustor's own `tdp` and `boost` sliders are hidden by tdp.py, because the
+#   active preset's sliders below are the same two values -- showing both
+#   would put two TDP sliders one above the other. That is a TAG override
+#   through the merge, not a patch: pick_tag takes tags from whoever merges
+#   last, everything else falls through from adjustor's definition, and
+#   disabling this plugin brings its sliders straight back.
 #
 # HOW A PRESET IS APPLIED
-#   Selecting one writes tdp.asus.tdp_v2.custom.tdp / .custom.boost and sets
-#   tdp.asus.tdp_v2.mode to "custom" -- the identical path a user takes by
-#   hand. adjustor then does every hardware write.
+#   tdp.py writes the selected preset's values into
+#   tdp.asus.tdp_v2.custom.tdp / .custom.boost -- the same keys the hidden
+#   sliders drive -- and adjustor's existing custom-mode path does every
+#   hardware write.
 #
-#   Reusing the stock path rather than adding preset MODES is deliberate and
-#   is what makes this survive KDE. Unplugging makes KDE change its power
-#   profile; adjustor maps that onto a stock mode and force-writes it over the
-#   config. Against a preset mode that silently replaced the user's choice
-#   (observed: unplugging landed on Silent). Against Custom it only flips the
-#   visible LABEL, because the quiet branch writes a fan curve and never
-#   touches PPT -- so the wattage survives. That is behaviour stock Custom has
-#   always had, and inheriting it is worth more than owning a dropdown entry.
+#   Reusing the stock path rather than adding preset MODES is what makes this
+#   survive KDE. Unplugging makes KDE change its power profile; adjustor maps
+#   that onto a stock mode and force-writes it over the config. Against a
+#   preset mode that silently replaced the user's choice. Against Custom it
+#   only flips the visible LABEL, because the quiet branch writes a fan curve
+#   and never touches PPT -- so the wattage survives.
 #
 # THE PRESET LIST IS DYNAMIC
 #   hhd fixes a mode's entries when settings() runs, so add/remove works by
-#   storing a count and asking hhd to rebuild the tree. `active.modes` and the
-#   two power-change dropdowns below are therefore filled in by tdp.py, not
-#   written here -- this file provides the TEMPLATE for one preset and the
-#   shell around it.
+#   storing a count and asking hhd to rebuild the tree. `z13_active.modes` and
+#   the two power-change dropdowns are filled in by tdp.py; this file provides
+#   the TEMPLATE for one preset and the shell around it.
 
 # ── one preset ────────────────────────────────────────────────────────────
 # Deep-copied per slot by tdp.py. Never referenced by a YAML alias: aliases
@@ -86,10 +96,9 @@ preset_template:
             sppt:
               type: int
               title: PL2  (short boost)
-              # Ceilings from asus-armoury's max_value, which corroborate
-              # z13ctl-plus's documented caps. Its MINIMA are ignored for the
-              # same reason as PL1's. tdp.py enforces PL1 <= PL2 <= PL3 before
-              # writing, because the firmware REJECTS a lower tier that
+              # Ceilings from asus-armoury's max_value. Its MINIMA are ignored
+              # for the same reason as PL1's. tdp.py enforces PL1 <= PL2 <= PL3
+              # before writing, because the firmware REJECTS a lower tier that
               # exceeds a higher one rather than clamping it.
               min: 5
               max: 92
@@ -112,123 +121,119 @@ preset_template:
                 it lower.
 
 
-# ── the container tdp.py mounts ───────────────────────────────────────────
-z13_presets:
-  type: container
-  title: Custom Presets
-  hint: >-
-    Named power profiles applied through adjustor's Custom mode. The TDP Mode
-    selector above will read "Custom" while one is active.
-  children:
+# ── merged into adjustor's custom mode ────────────────────────────────────
+# Every key is z13_-prefixed so nothing can collide with adjustor's own
+# `tdp` and `boost` children in the same container.
+z13_custom_children:
 
-    active:
-      type: mode
-      title: Preset
-      tags: [dropdown]
-      # `modes` is filled in by tdp.py from the stored count. Left empty here
-      # rather than omitted so the shape is obvious when reading this file.
-      modes: {}
+  z13_active:
+    type: mode
+    title: Preset
+    tags: [dropdown]
+    # `modes` is filled in by tdp.py from the stored count. Left empty here
+    # rather than omitted so the shape is obvious when reading this file.
+    modes: {}
 
-    add:
-      type: action
-      title: Add Preset
-      hint: >-
-        Appends a slot, copying the values of the one selected above so a new
-        preset starts from something useful. Rebuilds the settings tree, so
-        the panel reloads briefly.
+  z13_add:
+    type: action
+    title: Add Preset
+    hint: >-
+      Appends a slot, copying the values of the one selected above so a new
+      preset starts from something useful. Rebuilds the settings tree, so the
+      panel reloads briefly.
 
-    remove:
-      type: action
-      title: Remove Preset
-      hint: >-
-        Deletes the selected preset. The last one cannot be removed. Rebuilds
-        the settings tree, so the panel reloads briefly.
+  z13_remove:
+    type: action
+    title: Remove Preset
+    hint: >-
+      Deletes the selected preset. The last one cannot be removed. Rebuilds
+      the settings tree, so the panel reloads briefly.
 
-    count:
-      type: int
-      title: Preset Slots
-      # How many slots exist. Persisted here so the list survives a restart --
-      # settings() cannot ask the config, so tdp.py reads this in update() and
-      # rebuilds if it disagrees with what it last generated.
-      #
-      # Visible rather than hidden on purpose: it is the honest way to see and
-      # repair the count if an add/remove ever leaves it inconsistent.
-      tags: [non-essential]
-      min: 1
-      max: 8
-      step: 1
-      default: 2
-      hint: >-
-        Number of preset slots. Normally changed with the buttons above.
+  z13_count:
+    type: int
+    title: Preset Slots
+    # How many slots exist. Persisted here so the list survives a restart --
+    # settings() cannot ask the config, so tdp.py reads this in update() and
+    # rebuilds if it disagrees with what it last generated.
+    #
+    # Visible rather than hidden on purpose: it is the honest way to see and
+    # repair the count if an add/remove ever leaves it inconsistent.
+    tags: [non-essential]
+    min: 1
+    max: 8
+    step: 1
+    default: 2
+    hint: >-
+      Number of preset slots. Normally changed with the buttons above.
 
-    # Written by tdp.py, read by adjustor via the z13-tdp-presets patch. A
-    # preset always publishes both, so these carry the limits actually in
-    # force. They stay 0 only while no preset has been applied -- which is
-    # what the stock Custom mode always sees, leaving upstream's own
-    # derivation in charge for it.
-    sppt:
-      type: int
-      title: Applied PL2
-      tags: [non-essential]
-      min: 0
-      max: 92
-      step: 1
-      default: 0
-      unit: W
-      hint: >-
-        Read-only in practice — set from the active preset. 0 means the limit
-        is derived rather than stated.
-    fppt:
-      type: int
-      title: Applied PL3
-      tags: [non-essential]
-      min: 0
-      max: 93
-      step: 1
-      default: 0
-      unit: W
-      hint: >-
-        Read-only in practice — set from the active preset. 0 means the limit
-        is derived rather than stated.
+  # Written by tdp.py, read by adjustor via the z13-tdp-presets patch. A
+  # preset always publishes both, so these carry the limits actually in force.
+  # They stay 0 only while no preset has been applied.
+  z13_sppt:
+    type: int
+    title: Applied PL2
+    tags: [non-essential]
+    min: 0
+    max: 92
+    step: 1
+    default: 0
+    unit: W
+    hint: >-
+      Read-only in practice — set from the active preset. 0 means the limit is
+      derived rather than stated.
+  z13_fppt:
+    type: int
+    title: Applied PL3
+    tags: [non-essential]
+    min: 0
+    max: 93
+    step: 1
+    default: 0
+    unit: W
+    hint: >-
+      Read-only in practice — set from the active preset. 0 means the limit is
+      derived rather than stated.
 
+  z13_auto:
+    type: mode
+    title: Preset on Power Change
+    # Default disabled: enabling it means unplugging can move you off
+    # something you chose by hand.
+    #
+    # It lives here, under Custom, so the presets have exactly one home rather
+    # than a second menu alongside. The trade-off is that it is only VISIBLE
+    # while Custom is selected -- it keeps working from any mode, because
+    # tdp.py reads the stored config rather than what is on screen.
+    default: disabled
+    hint: >-
+      Apply a preset automatically when the charger is plugged in or
+      unplugged. Edge-triggered -- it acts on the transition, never
+      continuously, so a change you make by hand afterwards stays. On startup
+      it adopts the current power source without applying anything.
+    modes:
+      disabled:
+        type: container
+        title: Disabled
+      enabled:
+        type: container
+        title: Enabled
+        children:
+          # `options` for both are filled in by tdp.py: the presets that
+          # currently exist, plus adjustor's three stock profiles.
+          ac_preset:
+            type: multiple
+            title: On AC
+            tags: [dropdown]
+            options: {}
+          dc_preset:
+            type: multiple
+            title: On Battery
+            tags: [dropdown]
+            options: {}
 
-# ── power-change policy ───────────────────────────────────────────────────
-z13_tdp_auto:
-  type: mode
-  title: Preset on Power Change
-  # Default disabled: enabling it means unplugging can move you off something
-  # you chose by hand.
-  default: disabled
-  hint: >-
-    Apply a preset automatically when the charger is plugged in or unplugged.
-    Edge-triggered -- it acts on the transition, never continuously, so a
-    change you make by hand afterwards stays. On startup it adopts the current
-    power source without applying anything.
-  modes:
-    disabled:
-      type: container
-      title: Disabled
-    enabled:
-      type: container
-      title: Enabled
-      children:
-        # `options` for both are filled in by tdp.py: the presets that
-        # currently exist, plus adjustor's three stock profiles.
-        ac_preset:
-          type: multiple
-          title: On AC
-          tags: [dropdown]
-          options: {}
-        dc_preset:
-          type: multiple
-          title: On Battery
-          tags: [dropdown]
-          options: {}
-
-
-# Filled by tdp.py. An empty string renders as nothing, so this is invisible
-# unless there is something wrong to report.
-z13_tdp_status:
-  type: display
-  title: " "
-  tags: []
+  # Filled by tdp.py. An empty string renders as nothing, so this is invisible
+  # unless there is something wrong to report.
+  z13_status:
+    type: display
+    title: " "
+    tags: []
