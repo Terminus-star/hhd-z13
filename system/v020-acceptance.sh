@@ -202,8 +202,9 @@ import hhd_z13
 print(hhd_z13.__file__)
 print(','.join(type(p).__name__ for p in hhd_z13.autodetect([])))
 " 2>&1)
-if echo "$OUT" | grep -q "Z13CpuPlugin" && echo "$OUT" | grep -q "Z13DisplayPlugin"; then
-  p "plugin autodetect" "Z13CpuPlugin + Z13DisplayPlugin"
+if echo "$OUT" | grep -q "Z13CpuPlugin" && echo "$OUT" | grep -q "Z13DisplayPlugin" \
+   && echo "$OUT" | grep -q "Z13FirmwarePlugin"; then
+  p "plugin autodetect" "Z13CpuPlugin + Z13DisplayPlugin + Z13FirmwarePlugin"
   echo "$OUT" | head -1 | sed 's|^|        loaded from: |'
 else f "plugin autodetect" "$(echo "$OUT" | tail -1)"; fi
 

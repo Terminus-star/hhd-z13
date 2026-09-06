@@ -40,9 +40,10 @@ WHY THE VALUES ARE VALIDATED AGAINST possible_values
     The driver publishes what it accepts (`possible_values`, "0;1" here).
     Writing outside that set fails at the firmware level, and asus-armoury
     reports that as a write error rather than clamping -- so an unsupported
-    value would look like a dead toggle. Reading the set at settings() time
-    means a firmware update that changes it is noticed rather than silently
-    fought.
+    value would look like a dead toggle. The set is read once in __init__ --
+    that is, at autodetect() time, before settings() is ever called -- so a
+    firmware update that changes it is noticed on the next hhd start rather
+    than silently fought.
 """
 
 import logging
@@ -138,11 +139,12 @@ class Z13FirmwarePlugin(HHDPlugin):
         for leaf, attr in ATTRS:
             if attr not in self.available:
                 continue
-            path = (
-                f"gamemode.display.{leaf}"
-                if attr == "panel_overdrive"
-                else f"gamemode.z13_firmware.{leaf}"
-            )
+            # Every attribute this plugin still owns lives in its own
+            # container. panel_overdrive used to be mounted under
+            # gamemode.display and needed a second path here; it became a tier
+            # of the Refresh Rate selector instead and is applied from
+            # display.py, so the branch was dead.
+            path = f"gamemode.z13_firmware.{leaf}"
             try:
                 new = conf[path].to(bool)
             except Exception:

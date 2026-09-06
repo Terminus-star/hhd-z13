@@ -374,6 +374,46 @@ def _apply_overdrive(on: bool) -> None:
         pass
 
 
+def _adopt_overdrive(live: str) -> str:
+    """Reconstruct the overdrive TIER from a plain rate plus the panel flag.
+
+    read_rate() reports Hz, so it can only ever return "60" or "180". The
+    overdrive tier is ours, not the compositor's -- nothing in kscreen knows
+    the selection exists. Adopting the raw reading therefore used to demote a
+    stored "overdrive" selection to plain "180" while leaving the firmware
+    flag ON, and nothing downstream could notice: the apply branch saw
+    old_rate == config, and the reconcile compares against _rate_hz(), which
+    maps overdrive to "180" too. So the UI read "180Hz" while the panel was
+    still overdriven, with no path back to off.
+
+    Worse when the panel was at 60 Hz at that moment -- the adopted value
+    pinned the one pairing the tier exists to make unreachable, overdrive's
+    overshoot held across a 16.7 ms frame, which is where inverse ghosting
+    shows.
+
+    This runs on every availability or backend transition, not only at
+    startup, because old_rate is reset whenever either changes -- so
+    VT-switching into gamescope and back was enough to trigger it.
+    """
+    from .firmware import _read as _fw_read
+
+    try:
+        if not _fw_read("panel_overdrive"):
+            return live
+    except Exception:
+        # Same contract as _apply_overdrive: never let an image-quality
+        # refinement break adopting the rate itself.
+        return live
+
+    if live == TOP_RATE:
+        return OVERDRIVE_RATE
+    # The flag is on at a rate that cannot express it. Rather than adopt an
+    # unrepresentable pairing, turn it off -- the selector has no way to show
+    # "60 Hz + overdrive", so leaving it set would be invisible drift.
+    _apply_overdrive(False)
+    return live
+
+
 def _resolve_rate(mode, manual, backend):
     """Map the Auto/Manual gate onto an actual refresh rate.
 
@@ -656,6 +696,11 @@ class Z13DisplayPlugin(HHDPlugin):
             # power source then disagree with that, the next tick applies it.
             live = read_rate(session, backend, display)
             if live is not None:
+                # Fold the firmware flag back into the selection before
+                # storing it. read_rate reports Hz and can never return the
+                # overdrive tier, so adopting it raw silently dropped the
+                # tier while leaving the panel overdriven.
+                live = _adopt_overdrive(live)
                 self.old_rate = live
                 # Only ever write a rate back into an EXPLICIT setting. Doing
                 # it under "auto" would silently demote the user's policy to
