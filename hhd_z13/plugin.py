@@ -499,15 +499,23 @@ class Z13CpuPlugin(HHDPlugin):
         # rendered "Processor Settings" and then "Z13 CPU" underneath it. No
         # tag fixes that; the wrapper itself has to go.
         #
-        # The wrapper also carried non-essential for the whole group, so push
-        # it onto each child -- otherwise flattening would silently promote
-        # these controls into the essential view.
-        children = sets["z13_cpu"]["children"]
-        for c in children.values():
-            tags = c.setdefault("tags", [])
-            if "non-essential" not in tags:
-                tags.append("non-essential")
-        return {"tdp": {"amd_energy": {"type": "container", "children": children}}}
+        # Tags are taken from the YAML as written. An earlier version pushed
+        # the dissolved wrapper's "non-essential" onto every child, on the
+        # assumption that a group tag had to be preserved somewhere -- but hhd
+        # does not cascade container tags to children at all: adjustor's own
+        # amd_energy container is non-essential while the mode and gpu_freq
+        # children inside it are untagged, and it is those children the
+        # sidebar shows. Propagating the tag only demoted our controls below
+        # the upstream ones they sit beside, so they vanished from the sidebar
+        # while adjustor's stayed. Each control now carries what its YAML says.
+        return {
+            "tdp": {
+                "amd_energy": {
+                    "type": "container",
+                    "children": sets["z13_cpu"]["children"],
+                }
+            }
+        }
 
     def update(self, conf: Config):
         new_pstate = conf["tdp.amd_energy.pstate.mode"].to(str)

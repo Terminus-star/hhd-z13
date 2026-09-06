@@ -596,12 +596,24 @@ class Z13DisplayPlugin(HHDPlugin):
         # applies at the first level inside a section, so a nested wrapper
         # rendered "Display" and then "Z13 Display" beneath it. The controls
         # become direct siblings of hhd's own touchscreen toggles instead.
-        children = sets["z13_display"]["children"]
-        for c in children.values():
-            tags = c.setdefault("tags", [])
-            if "non-essential" not in tags:
-                tags.append("non-essential")
-        return {"gamemode": {"display": {"type": "container", "children": children}}}
+        # Tags are taken from the YAML as written. An earlier version pushed
+        # the dissolved wrapper's "non-essential" onto every child, to
+        # "preserve" it -- but hhd does not cascade container tags to children
+        # in the first place: adjustor's amd_energy container is
+        # non-essential while its own mode/gpu_freq children are untagged.
+        #
+        # The effect was to demote these below hhd's touchscreen toggles
+        # sitting right beside them (tags=[]), so the refresh control vanished
+        # from the sidebar while upstream's stayed. Each control now carries
+        # only what its YAML says it should.
+        return {
+            "gamemode": {
+                "display": {
+                    "type": "container",
+                    "children": sets["z13_display"]["children"],
+                }
+            }
+        }
 
     def update(self, conf: Config):
         available, reason, session, backend, display = check_availability()

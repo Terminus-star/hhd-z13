@@ -50,7 +50,7 @@ z13_display:
               modes:
                 auto:
                   type: container
-                  title: Auto (180 Hz on AC, 60 Hz on battery)
+                  title: Auto 
                   children:
                     # Lives inside the "auto" mode container, so hhd renders it
                     # only while Auto is selected -- a mode shows the children
@@ -61,7 +61,6 @@ z13_display:
                     current:
                       type: display
                       title: Current
-                      tags: [ non-essential ]
                       hint: >-
                         What the panel is actually running at, read back from
                         the compositor rather than inferred from the power
