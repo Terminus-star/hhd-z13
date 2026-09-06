@@ -131,10 +131,25 @@ ok(z13.marked_state(out.__class__ and target, table) is not None,
 # --- idempotence ----------------------------------------------------------
 # The pacman hook re-runs this on every hhd upgrade, so a second pass over an
 # already-patched file must be a no-op rather than nesting the replacement.
+# Mirror apply_marked's own logic: it skips an entry whose sentinel is already
+# present, BEFORE touching the text. That guard is what makes a re-apply safe
+# for a replacement that reproduces its own anchor -- several do, because the
+# clearest way to add code after a block is to restate the block. Replaying
+# blindly would nest those, which is the failure this check exists to catch.
 again = out
 for entry in table:
+    if entry[3] in again:
+        continue
     again = again.replace(entry[1], entry[2].format(mark=z13.MARK_TDP), 1)
 ok(again == out, "re-applying over a patched file changes nothing")
+
+# ...and the guard is load-bearing, not incidental: at least one entry would
+# genuinely re-match its own output without it.
+naive = out
+for entry in table:
+    naive = naive.replace(entry[1], entry[2].format(mark=z13.MARK_TDP), 1)
+ok(naive != out or all(e[1] not in e[2].format(mark=z13.MARK_TDP) for e in table),
+   "the sentinel guard is what prevents nesting, not luck")
 
 # --- what the entries are for ---------------------------------------------
 # The clock fix. Asserted on the RESULT rather than the diff, so it holds

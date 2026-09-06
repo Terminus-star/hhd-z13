@@ -708,6 +708,46 @@ ADJUSTOR_ASUS_PATCHES = (
         "replace",
     ),
     (
+        "stock-ppt",
+        '                case _:  # "performance":\n'
+        "                    set_thermal_profile(1)\n"
+        '                    new_target = "performance"\n',
+        """\
+                case _:  # "performance":
+                    set_thermal_profile(1)
+                    new_target = "performance"
+
+            # {mark}: make the stock profiles mean what they say.
+            #
+            # Upstream writes only throttle_thermal_policy here -- a fan and
+            # thermal policy -- and never touches the power limits. So the
+            # profiles announce a wattage in their own label and do not apply
+            # it: selecting "Performance (45W)" after a 9 W preset leaves the
+            # machine at 9 W, with nothing on screen disagreeing except a
+            # readback. Observed exactly that.
+            #
+            # The sustained value comes from adjustor's OWN per-device table,
+            # so this stays correct for any device it supports rather than
+            # encoding one machine's numbers. The two boost limits use this
+            # panel's shipped proportions (60/75/86 W, so 1.25x and 1.433x)
+            # capped at its maxima, which is what hhd-z13 applies everywhere
+            # else -- one rule across every mode instead of a different answer
+            # depending on how you got there.
+            _z13_w = self.tdp_data.get(mode)
+            if _z13_w:
+                _z13_s = min(round(_z13_w * 1.25), 92)
+                _z13_f = min(round(_z13_w * 43 / 30), 93)
+                time.sleep(TDP_DELAY)
+                set_tdp("fast", FTDP_FN, _z13_f)
+                time.sleep(TDP_DELAY)
+                set_tdp("slow", STDP_FN, _z13_s)
+                time.sleep(TDP_DELAY)
+                set_tdp("steady", CTDP_FN, _z13_w)
+""",
+        "_z13_w = self.tdp_data.get(mode)",
+        "replace",
+    ),
+    (
         "ppd-echo",
         '            elif ev["type"] == "ppd":\n                match ev["status"]:\n',
         """\
