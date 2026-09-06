@@ -131,8 +131,38 @@ c["tdp.asus.z13_presets.active.p1.tdp"] = 9
 p.prepare(c)
 ok(c[t.CUSTOM_TDP].to(int) == 9, f"editing a preset applies it ({c[t.CUSTOM_TDP].to(int)})")
 ok(c[t.MODE_PATH].to(str) == "custom", "and selects adjustor's Custom mode")
-ok(c[t.SPPT].to(int) == 0 and c[t.FPPT].to(int) == 0,
-   "PL2/PL3 left derived while the preset is on Auto")
+# Auto scales from THIS panel's firmware proportions (60/75/86 W shipped),
+# not from a fixed ceiling. 9 W -> 11/13.
+ok((c[t.SPPT].to(int), c[t.FPPT].to(int)) == (11, 13),
+   f"Auto scales PL2/PL3 from the panel's own ratios "
+   f"({c[t.SPPT].to(int)}, {c[t.FPPT].to(int)})")
+
+# The value that matters: at 45 W a fixed 35 W ceiling would give 45/45/45,
+# i.e. the boost flag doing nothing at the wattage this machine runs at most.
+p_ = plugin()
+c_ = mkconf(active="p1", slots={"p1": slot(20), "p2": slot(20)})
+p_.prepare(c_)
+c_["tdp.asus.z13_presets.active.p1.tdp"] = 45
+p_.prepare(c_)
+ok((c_[t.CUSTOM_TDP].to(int), c_[t.SPPT].to(int), c_[t.FPPT].to(int)) == (45, 56, 64),
+   f"45 W yields real headroom, not 45/45/45 "
+   f"({c_[t.CUSTOM_TDP].to(int)}/{c_[t.SPPT].to(int)}/{c_[t.FPPT].to(int)})")
+
+# Ceilings are the firmware's own max_value figures.
+c_["tdp.asus.z13_presets.active.p1.tdp"] = 65
+p_.prepare(c_)
+ok(c_[t.SPPT].to(int) <= t.MAX_SPPT and c_[t.FPPT].to(int) <= t.MAX_FPPT,
+   f"capped at the firmware maxima "
+   f"({c_[t.SPPT].to(int)} <= {t.MAX_SPPT}, {c_[t.FPPT].to(int)} <= {t.MAX_FPPT})")
+
+# Boost off means one flat limit, at every wattage.
+p_ = plugin()
+c_ = mkconf(active="p1", slots={"p1": slot(45, boost=False), "p2": slot(20)})
+p_.prepare(c_)
+c_["tdp.asus.z13_presets.active.p1.tdp"] = 46
+p_.prepare(c_)
+ok(c_[t.SPPT].to(int) == 46 and c_[t.FPPT].to(int) == 46,
+   f"boost off gives one flat limit ({c_[t.SPPT].to(int)}, {c_[t.FPPT].to(int)})")
 
 # THE KDE TOLERANCE. adjustor's ppd handler force-writes a stock mode over the
 # config on every power transition. Stock Custom survives that because the

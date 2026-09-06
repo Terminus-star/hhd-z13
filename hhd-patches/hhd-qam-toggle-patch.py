@@ -564,40 +564,38 @@ ADJUSTOR_FUSE_PATCHES = (
 #   wattage survives, which is the behaviour stock Custom has always had.
 #
 # ENTRY 1 -- per-preset PL2/PL3.
-#   Upstream derives the short and fast limits as
-#       min(max(steady, MAX_TDP_BOOST), int(steady * RATIO))
-#   with MAX_TDP_BOOST = 35, FPPT_BOOST = 35/25, SPPT_BOOST = 30/25.
+#   hhd-z13 computes all three power limits itself, from this machine's own
+#   firmware figures, and needs somewhere to write them.
 #
-#   MAX_TDP_BOOST is not a boost amount, it is the CEILING of the boost range,
-#   and 35 is the ROG Ally's *maximum* TDP -- as are the ratios, which are that
-#   device's 30 W and 35 W limits over its 25 W performance tier. On an Ally
-#   the ceiling sits above every sustained value the slider can reach, so the
-#   min() picks the ratio-scaled number and boost works throughout.
+#   Those figures, read from
+#   /sys/class/firmware-attributes/asus-armoury/attributes/:
 #
-#   The Z13's sustained range reaches 65 W. For anything at or above 35 W the
-#   ceiling is BELOW the sustained value itself, so the expression collapses to
-#   min(steady, steady * ratio) = steady and all three limits become equal:
+#       attribute       default_value   max_value
+#       ppt_pl1_spl          60             80
+#       ppt_pl2_sppt         75             92
+#       ppt_pl3_fppt         86             93
 #
-#       PL1     as shipped        with a 65 W ceiling
-#        9 W -> 10 / 12            11 / 12
-#       20 W -> 24 / 28            25 / 28
-#       45 W -> 45 / 45  (inert)   56 / 64
-#       65 W -> 65 / 65  (inert)   65 / 65
+#   So the firmware's own shipped relationship between the tiers is
+#   60 / 75 / 86 W -- PL2 at 1.25x the sustained limit, PL3 at 1.433x -- and
+#   hhd-z13 reproduces those proportions at whatever wattage a preset asks
+#   for, capped at 92 / 93 W.
 #
-#   So this is not "the Z13 happens to differ" -- the constant encodes another
-#   machine's hardware limits. This device's own firmware defaults are
-#   60/75/86 W, i.e. ratios of 1.25 and 1.433 against a 93 W ceiling, so the
-#   RATIOS are nearly right and only the ceiling is wrong.
+#   Upstream's own derivation is built around a fixed 35 W ceiling. This
+#   machine sustains up to 65 W, so from 35 W upward that ceiling sits below
+#   the sustained value itself and
+#   min(max(steady, ceiling), steady * ratio) collapses to steady -- all three
+#   limits equal and the boost flag inert, across most of the range this
+#   machine actually runs in:
 #
-#   Upstream even has the field for it: DeviceTDP carries `max_tdp_boost`, but
-#   it is None for every device in the table and the code never reads it. That
-#   makes the per-device fix a genuinely small upstream change, and a better
-#   one than this patch -- but it needs numbers for hardware we cannot measure,
-#   so hhd-z13 lets a preset state all three outright instead.
+#       PL1        upstream       from this panel's figures
+#        9 W  ->   10 / 12         11 / 13
+#       20 W  ->   24 / 28         25 / 29
+#       45 W  ->   45 / 45         56 / 64
+#       65 W  ->   65 / 65         81 / 93
 #
-#   A preset publishes them on two config keys; both non-zero selects them.
-#   Absent or zero, upstream behaviour is untouched -- including for the stock
-#   Custom mode, which never sets them.
+#   A preset publishes its three values on two config keys; both non-zero
+#   selects them. Absent or zero, upstream behaviour is untouched -- which is
+#   what the stock Custom mode always gets, since it never writes them.
 #
 # ENTRIES 2-3 -- an upstream bug, and a hard prerequisite for retiring
 # z13-hibernate's tdp-restore.sh.
@@ -623,12 +621,11 @@ ADJUSTOR_ASUS_PATCHES = (
         """\
                 self.queue_tdp = None
                 # {mark}: explicit PL2/PL3 when an hhd-z13 preset supplies
-                # them. Upstream's derived pair below uses MAX_TDP_BOOST = 35,
-                # an ROG Ally constant with upstream's own "TODO: Make per
-                # device", so min(max(steady, 35), steady * 1.4) collapses to
-                # steady for anything at or above 35 W -- the boost toggle
-                # does nothing there. These keys let a preset state the three
-                # limits outright.
+                # them. hhd-z13 computes all three from this machine's own
+                # firmware figures (60/75/86 W shipped, 92/93 W maxima) rather
+                # than from the derived pair below, whose fixed 35 W ceiling
+                # sits under this machine's sustained range and makes the
+                # boost flag inert from 35 W upward.
                 #
                 # Both must be non-zero to take effect, so the stock Custom
                 # mode -- which never writes them -- keeps upstream behaviour

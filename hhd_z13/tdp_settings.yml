@@ -57,15 +57,12 @@ preset_template:
       title: TDP Boost
       default: True
       hint: >-
-        Lets the short and fast limits rise above the sustained one. On this
-        machine it only has an effect BELOW 35 W. adjustor caps the boost
-        range at the ROG Ally's maximum TDP of 35 W, which is above anything
-        that device can sustain but well inside this one's 5-65 W range, so
-        from 35 W up the cap sits below the sustained value and all three
-        limits come out equal. At 45 W you get 45/45/45. Use Manual below to
-        state them yourself -- 45/56/64 is roughly what this panel's own
-        firmware ratios would give. Ignored entirely when Power Limits is set
-        to Manual.
+        Lets the short and fast limits rise above the sustained one. With
+        Power Limits on Auto this follows the proportions this machine's
+        firmware ships -- PL2 at 1.25x the sustained value and PL3 at 1.433x,
+        so 45 W gives 45/56/64. Turning it off asks for one flat limit
+        instead. Ignored entirely when Power Limits is set to Manual, which
+        states all three itself.
 
     ppt:
       type: mode
@@ -73,14 +70,15 @@ preset_template:
       tags: [dropdown]
       default: auto
       hint: >-
-        Auto derives the short (PL2) and fast (PL3) limits from the sustained
-        one, which is what adjustor does on its own. Manual states all three
-        outright -- the only way to get a meaningful PL2/PL3 split at or above
-        35 W, where the boost toggle stops doing anything.
+        Auto scales the short (PL2) and fast (PL3) limits from the sustained
+        one using the proportions this machine's firmware ships -- 60/75/86 W,
+        so 1.25x and 1.433x -- capped at its 92/93 W maxima. Manual states all
+        three outright. Either way hhd-z13 computes them from this hardware's
+        own figures rather than leaving it to a generic formula.
       modes:
         auto:
           type: container
-          title: Auto (derived from TDP)
+          title: Auto (this panel's firmware ratios)
         manual:
           type: container
           title: Manual
@@ -163,9 +161,11 @@ z13_presets:
       hint: >-
         Number of preset slots. Normally changed with the buttons above.
 
-    # Written by tdp.py, read by adjustor via the z13-tdp-presets patch. Both
-    # zero means "derive them", which is upstream's behaviour and what the
-    # stock Custom mode always gets.
+    # Written by tdp.py, read by adjustor via the z13-tdp-presets patch. A
+    # preset always publishes both, so these carry the limits actually in
+    # force. They stay 0 only while no preset has been applied -- which is
+    # what the stock Custom mode always sees, leaving upstream's own
+    # derivation in charge for it.
     sppt:
       type: int
       title: Applied PL2
