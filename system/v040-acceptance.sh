@@ -62,7 +62,7 @@ else
   grep -qF 'time.perf_counter() + APPLY_DELAY' "$ASUS_DRV" \
     && p "AC/DC re-apply clock" "perf_counter" \
     || f "AC/DC re-apply clock" "still time.time()"
-  grep -qF '_z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)' "$ASUS_DRV" \
+  grep -qF '_z13_s = conf.get("tdp.asus.tdp_v2.custom.z13_sppt", 0)' "$ASUS_DRV" \
     && p "manual PL2/PL3 override" "present" \
     || f "manual PL2/PL3 override" "a preset set to Manual will have PL2/PL3 derived"
 
@@ -115,14 +115,22 @@ def stval(path, default=None):
 # applied through its Custom mode, not extra modes -- that is what makes them
 # survive KDE's power-profile change on unplug.
 print("STOCKMODES " + ",".join(sorted(tv.get("modes", {}))))
-print("PRESETCTL " + str("z13_presets" in asus))
-print("AUTOCTL " + str("z13_tdp_auto" in asus))
+# Presets live INSIDE Custom, not beside it -- one menu, not two. A
+# z13_presets container at the container level would mean the superseded
+# layout is back.
+cust = tv.get("modes", {}).get("custom", {}).get("children", {})
+print("PRESETCTL " + str("z13_active" in cust))
+print("SIBLING " + str("z13_presets" in asus))
+print("AUTOCTL " + str("z13_auto" in cust))
+# adjustor's own sliders are hidden, since the active preset drives the same
+# two values and both showing would stack two TDP sliders in one menu.
+print("HIDDEN " + str("hide" in cust.get("tdp", {}).get("tags", [])
+                      and "hide" in cust.get("boost", {}).get("tags", [])))
 
-pres = asus.get("z13_presets", {}).get("children", {})
-slots = sorted(pres.get("active", {}).get("modes", {}))
+slots = sorted(cust.get("z13_active", {}).get("modes", {}))
 print("SLOTS " + ",".join(slots))
-print("COUNT " + str(stval("tdp.asus.z13_presets.count",
-                          pres.get("count", {}).get("default"))))
+print("COUNT " + str(stval("tdp.asus.tdp_v2.custom.z13_count",
+                          cust.get("z13_count", {}).get("default"))))
 
 mode = stval("tdp.asus.tdp_v2.mode") or tv.get("default")
 print("MODE " + str(mode))
@@ -130,16 +138,16 @@ print("MODE " + str(mode))
 # Only Custom is driven by a preset. On any other mode adjustor owns the
 # limits outright and there is nothing of ours to assert.
 if mode == "custom":
-    pid = stval("tdp.asus.z13_presets.active.mode") or "p1"
+    pid = stval("tdp.asus.tdp_v2.custom.z13_active.mode") or "p1"
     print("ACTIVE " + str(pid))
-    watts = stval(f"tdp.asus.z13_presets.active.{pid}.tdp")
+    watts = stval(f"tdp.asus.tdp_v2.custom.z13_active.{pid}.tdp")
     if not isinstance(watts, int):
-        watts = pres.get("active", {}).get("modes", {}).get(pid, {}) \
+        watts = cust.get("z13_active", {}).get("modes", {}).get(pid, {}) \
                     .get("children", {}).get("tdp", {}).get("default")
     print("WATTS " + str(watts))
-    print("PPT %s %s" % (stval("tdp.asus.z13_presets.sppt", 0),
-                         stval("tdp.asus.z13_presets.fppt", 0)))
-print("STATUS " + str(stval("tdp.asus.z13_tdp_status") or ""))
+    print("PPT %s %s" % (stval("tdp.asus.tdp_v2.custom.z13_sppt", 0),
+                         stval("tdp.asus.tdp_v2.custom.z13_fppt", 0)))
+print("STATUS " + str(stval("tdp.asus.tdp_v2.custom.z13_status") or ""))
 PY
 )
 
@@ -154,10 +162,17 @@ else
     || f "adjustor's dropdown untouched" "$(echo "$EVAL" | sed -n 's/^STOCKMODES //p')"
 
   [ "$(echo "$EVAL" | sed -n 's/^PRESETCTL //p')" = "True" ] \
-    && p "preset container" "present" || f "preset container" "z13_presets missing"
+    && p "presets inside Custom" "present" \
+    || f "presets inside Custom" "z13_active missing from custom"
+  [ "$(echo "$EVAL" | sed -n 's/^SIBLING //p')" = "False" ] \
+    && p "no concurrent preset menu" "collapsed under Custom" \
+    || f "no concurrent preset menu" "z13_presets still a sibling container"
+  [ "$(echo "$EVAL" | sed -n 's/^HIDDEN //p')" = "True" ] \
+    && p "adjustor's duplicate sliders" "hidden" \
+    || w "adjustor's duplicate sliders" "visible — two TDP sliders in one menu"
   [ "$(echo "$EVAL" | sed -n 's/^AUTOCTL //p')" = "True" ] \
     && p "power-change policy control" "present" \
-    || f "power-change policy control" "z13_tdp_auto missing"
+    || f "power-change policy control" "z13_auto missing"
 
   SLOTS=$(echo "$EVAL" | sed -n 's/^SLOTS //p')
   COUNT=$(echo "$EVAL" | sed -n 's/^COUNT //p')

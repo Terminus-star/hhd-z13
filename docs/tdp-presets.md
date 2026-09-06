@@ -15,24 +15,37 @@ false version is the intuitive one and it will be reinvented otherwise.
 Presets are **user-created value sets**, applied through adjustor's own Custom
 mode. Add and remove them from the QAM; the list is not fixed.
 
+They live **inside** adjustor's Custom mode, not beside it — selecting Custom
+is selecting the presets:
+
 ```
 Asus TDP
-├─ TDP Mode  [ Custom  ▾ ]        ← adjustor's own, unmodified
-│    TDP        [====   ] 9 W     ← written by the active preset
-│    TDP Boost  [x]
-├─ Custom Presets
-│    Preset      [ Preset 2  ▾ ]
-│       TDP (PL1, sustained)  [===   ] 9 W
-│       TDP Boost             [x]
-│       Power Limits          [ Manual ▾ ]
-│          PL2 (short boost)  [====  ] 12 W
-│          PL3 (fast boost)   [===== ] 15 W
-│    [ Add Preset ]  [ Remove Preset ]
-│    Preset Slots  [ 2 ]
-└─ Preset on Power Change  [ Enabled ▾ ]
-     On AC       [ Preset 1 ▾ ]
-     On Battery  [ Preset 2 ▾ ]
+└─ TDP Mode  [ Custom  ▾ ]           ← adjustor's own dropdown, unmodified
+     Preset   [ Preset 2 ▾ ]
+        TDP (PL1, sustained)  [===   ]  9 W
+        TDP Boost             [x]
+        Power Limits          [ Manual ▾ ]
+           PL2 (short boost)  [====  ] 12 W
+           PL3 (fast boost)   [===== ] 15 W
+     [ Add Preset ]  [ Remove Preset ]
+     Preset Slots  [ 2 ]
+     Applied PL2 / PL3   12 W / 15 W
+     Preset on Power Change  [ Enabled ▾ ]
+        On AC       [ Preset 1 ▾ ]
+        On Battery  [ Preset 2 ▾ ]
 ```
+
+adjustor's own `TDP` and `TDP Boost` sliders are **hidden**, because the active
+preset drives those same two values and showing both would stack two TDP
+sliders in one menu. That is a tag override through the merge, not a patch:
+`pick_tag` takes `tags` from whoever merges last, while `type`, `min`, `max`,
+`default` and `title` all fall through from adjustor's definition because we
+omit them. Disable this plugin and its sliders come straight back.
+
+The power-change policy sits here too, so the presets have exactly one home.
+The trade-off is that it is only *visible* under Custom — it keeps working from
+any mode, because the plugin reads the stored config rather than what is on
+screen.
 
 Each preset carries PL1 (5–65 W), a boost flag, and an **auto/manual gate for
 PL2/PL3**. Auto lets adjustor derive them; Manual states all three outright,
