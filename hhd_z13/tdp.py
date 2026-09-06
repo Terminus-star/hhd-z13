@@ -47,6 +47,7 @@ import glob
 import json
 import logging
 import os
+import time
 from copy import deepcopy
 
 from hhd.plugins import HHDPlugin, load_relative_yaml
@@ -57,6 +58,22 @@ from .plugin import _on_ac
 logger = logging.getLogger(__name__)
 
 MAX_PRESETS = 8
+
+# How long a power-change selection is held against anything that moves it.
+#
+# Unplugging fires TWO policies at once: ours picks a mode, and KDE
+# independently switches its own power profile. KDE's arrives as a "ppd" event
+# a moment later, adjustor maps it onto a stock mode, and its update()
+# FORCE-writes that over the config -- after our prepare(), so it wins.
+# Measured: selecting z13_p1 (9 W) on unplug, and 40 W -- quiet's wattage --
+# applied two seconds later.
+#
+# ppd-echo cannot help here. That entry suppresses adjustor answering an echo
+# of its OWN report; this is a genuine desktop-initiated change that merely
+# happens to be reacting to the same unplug we are. So the resolution has to
+# be on our side: hold the choice across the transition's aftershocks, then
+# stop, so a profile picked by hand a moment later still wins.
+HOLD_S = 15.0
 
 # NOT /etc/hhd: hhd watches that directory and reloads its whole configuration
 # on any write there. See the module docstring.
@@ -165,6 +182,7 @@ class Z13TdpPlugin(HHDPlugin):
         self._gen_n = 0            # preset count the current tree was built for
 
         self.old_ac = None         # None = first tick adopts, never applies
+        self._hold = None          # (mode, deadline) while a transition settles
         self.old_state = None      # (mode, watts, boost, sppt, fppt)
         self.old_applied = None    # last telemetry string written
         self._patched = None
@@ -277,6 +295,7 @@ class Z13TdpPlugin(HHDPlugin):
         try:
             if MODE_PATH not in conf or CUSTOM_TDP not in conf:
                 return
+            self._hold_choice(conf)
             self._power_change(conf)
             self._sync(conf)
         except Exception as e:
@@ -365,6 +384,28 @@ class Z13TdpPlugin(HHDPlugin):
         self._publish(watts, sppt, fppt)
         self.old_state = (mode, watts, boost, sppt, fppt)
 
+    def _hold_choice(self, conf):
+        """Re-assert a power-change selection while the transition settles.
+
+        Checked BEFORE the edge logic, because what overwrites us arrives
+        seconds after the edge -- by which point old_ac is already updated and
+        nothing would fire again.
+        """
+        if self._hold is None:
+            return
+        target, until = self._hold
+        if time.monotonic() >= until:
+            self._hold = None
+            return
+        if conf[MODE_PATH].to(str) == target:
+            return
+        logger.info(f"TDP mode moved off {target} during the power transition; re-asserting")
+        conf[MODE_PATH] = target
+        if target.startswith(PRESET_PREFIX):
+            self._apply_preset(conf, target)
+        else:
+            self.old_state = None
+
     def _power_change(self, conf):
         """Follow the charger, on the EDGE only."""
         if f"{POWER}.mode" not in conf:
@@ -373,6 +414,7 @@ class Z13TdpPlugin(HHDPlugin):
             # Re-arm, so turning the policy back on adopts the current source
             # rather than firing a stale edge from before it was off.
             self.old_ac = None
+            self._hold = None
             return
         ac = _on_ac()
         if ac is None:
@@ -387,14 +429,17 @@ class Z13TdpPlugin(HHDPlugin):
         self.old_ac = ac
         key = "ac_preset" if ac else "dc_preset"
         target = conf.get(f"{POWER}.enabled.{key}", "")
-        if target in STOCK_MODES:
+        if target in STOCK_MODES or self._preset(target) is not None:
             logger.info(f"Power source -> {'AC' if ac else 'battery'}: {target}")
+            # Armed even when the mode is ALREADY the target: the overwrite
+            # lands seconds later, so arming only on a change would leave the
+            # common case unprotected.
+            self._hold = (target, time.monotonic() + HOLD_S)
             conf[MODE_PATH] = target
-            self.old_state = None
-        elif self._preset(target) is not None:
-            logger.info(f"Power source -> {'AC' if ac else 'battery'}: {target}")
-            conf[MODE_PATH] = target
-            self._apply_preset(conf, target)
+            if target in STOCK_MODES:
+                self.old_state = None
+            else:
+                self._apply_preset(conf, target)
 
     # ── add / remove ──────────────────────────────────────────────────────
     def _add(self, conf):

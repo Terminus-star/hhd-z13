@@ -288,6 +288,72 @@ before = c[t.MODE_PATH].to(str)
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == before, "an unreadable charger changes nothing")
 
+
+# --- the transition is held against KDE ------------------------------------
+# Unplugging fires two policies at once: ours picks a mode, and KDE switches
+# its own power profile. KDE's arrives as a ppd event a moment later, adjustor
+# maps it to a stock mode and FORCE-writes it after our prepare(), so it wins.
+# Measured on hardware: z13_p1 selected on unplug, 40 W (quiet's wattage)
+# applied two seconds later, and the QAM showing Silent.
+class _Clock:
+    now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+clock = _Clock()
+t.time = clock
+
+store([{"tdp": 45, "boost": True, "sppt": 56, "fppt": 64},
+       {"tdp": 9, "boost": True, "sppt": 11, "fppt": 13}])
+p = plugin()
+c = mkconf(mode="custom", power="enabled", ac="z13_p1", dc="z13_p2", presets=2)
+with_ac(True)
+p.prepare(c)
+with_ac(False)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2", "unplugging selects the battery preset")
+
+c[t.MODE_PATH] = "quiet"          # what adjustor's ppd handler does to us
+clock.now += 2                    # the measured delay
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2",
+   f"a ppd change during the transition is overridden ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, "and the preset's own values are restored with it")
+
+# ...but only for the window. A profile picked later is a real choice.
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "quiet"
+p.prepare(c)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "quiet",
+   f"after the window, a hand-picked mode sticks ({c[t.MODE_PATH].to(str)})")
+
+# The hold arms even when the mode is ALREADY the target -- the overwrite
+# lands seconds later, so arming only on a change leaves the common case
+# (unplugging while already on the battery preset) unprotected.
+clock.now += 100
+with_ac(True)
+p.prepare(c)
+clock.now += 100
+with_ac(False)
+c[t.MODE_PATH] = "z13_p2"
+p.prepare(c)
+c[t.MODE_PATH] = "balanced"
+clock.now += 2
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2",
+   f"the hold arms with no mode change to make ({c[t.MODE_PATH].to(str)})")
+
+# Turning the policy off must drop the hold, or it would keep re-asserting a
+# choice the policy is no longer making.
+p2 = plugin()
+c2 = mkconf(mode="custom", power="disabled", presets=2)
+p2._hold = ("z13_p1", clock.now + 100)
+p2.prepare(c2)
+ok(p2._hold is None, "disabling the policy drops the hold")
+
 # A rebuild is fatal to an unpatched adjustor -- it clears tdp_ready, which
 # has no default, and adjustor only ever sets it once behind a latched
 # self.init. The whole TDP section disappears until hhd restarts.

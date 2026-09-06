@@ -1,8 +1,15 @@
 """z13_cpu -- CPU EPP/boost/perf-mode control for the ASUS ROG Flow Z13.
 
-Shells out to `z13ctl-plus cpu`, which already does the actual sysfs work
-(EPP, frequency floor, boost) and has a tested daemon behind it. This plugin
-exists only to put those controls natively in hhd's QAM -- inside gamescope
+Writes cpufreq sysfs directly. It used to shell out to `z13ctl-plus cpu`,
+which was reasonable while that tool was the tested path -- but every call
+was already paired with a full sysfs implementation for the modes where
+z13ctl-plus cannot read or write anything (guided and passive, where
+energy_performance_preference does not exist), so the subprocess was the
+special case rather than the rule. Dropping it removes the last runtime
+dependency on z13ctl-plus outside RGB, and hhd runs as root, so the
+permission grants that tool needs do not apply to us.
+
+This plugin exists to put those controls natively in hhd's QAM -- inside gamescope
 included, since QAM controls render there regardless of which plugin owns
 them -- because hhd's own tdp.amd_energy driver either duplicates (EPP), does
 not work (Boost -- every attempt logs "Failed to set CPU boost:" with no
@@ -44,10 +51,8 @@ SYNC WITH z13ctl-plus's OWN AUTOMATIC PRESET SWITCHING
     happens while it reads Enabled; EPP/Boost stay correct regardless.
 """
 import glob
-import json
 import logging
 import os
-import subprocess
 import time
 
 from hhd.plugins import HHDPlugin, load_relative_yaml
@@ -55,8 +60,6 @@ from hhd.plugins.conf import Config
 
 logger = logging.getLogger(__name__)
 
-Z13CTL = "z13ctl-plus"
-TIMEOUT_S = 10
 
 # amd_pstate has three modes and they do not expose the same knobs.
 #
@@ -162,8 +165,10 @@ def _governors() -> list[str]:
 
 
 def _get_live_sysfs() -> dict | None:
-    """The same shape _get_live() returns, read straight from sysfs, for the
-    modes where z13ctl-plus cannot read anything at all."""
+    """Live CPU power state, read straight from sysfs.
+
+    Was the fallback for the modes where z13ctl-plus cannot read anything;
+    it is now the only path. See _get_live()."""
     try:
         mn = _read_leaf("scaling_min_freq")
         mx = _read_leaf("scaling_max_freq")
@@ -184,26 +189,15 @@ def _get_live_sysfs() -> dict | None:
             "min_limit_khz": int(lo),
             "max_limit_khz": int(hi),
             "governor": _read_leaf("scaling_governor"),
+            # Only exists in active mode. The reconcile picks epp or governor
+            # depending on the pstate mode, so returning None here for the
+            # modes without it is correct rather than missing.
+            "epp": _read_leaf(EPP_LEAF) if _has_epp() else None,
             "boost": boost == "1",
         }
     except Exception:
         return None
 RECONCILE_INTERVAL_S = 2.0
-
-
-def _run(*args) -> bool:
-    """Run `z13ctl-plus cpu <args>`. Never raises -- a QAM control must not
-    be able to crash hhd's main loop no matter what the subprocess does."""
-    try:
-        subprocess.run(
-            [Z13CTL, "cpu", *args],
-            check=True,
-            capture_output=True,
-            timeout=TIMEOUT_S,
-        )
-        return True
-    except Exception:
-        return False
 
 
 def _get_live() -> dict | None:
@@ -214,19 +208,7 @@ def _get_live() -> dict | None:
     failure -- a read-back that cannot complete must not disturb anything
     already applied, so callers treat None as "skip reconciliation this
     tick", never as a value to act on."""
-    if not _has_epp():
-        return _get_live_sysfs()
-    try:
-        r = subprocess.run(
-            [Z13CTL, "cpu", "--get", "--json"],
-            check=True,
-            capture_output=True,
-            timeout=TIMEOUT_S,
-            text=True,
-        )
-        return json.loads(r.stdout)
-    except Exception:
-        return None
+    return _get_live_sysfs()
 
 
 PERF_FLOOR_MHZ = 2000
@@ -238,8 +220,6 @@ def _apply_perf(plugin, enable: bool) -> bool:
     ramp from, and boost on. The displaced values are snapshotted on the way
     IN only, so repeating --perf never overwrites the originals with perf's
     own, and --save restores what was actually there rather than a guess."""
-    if _has_epp():
-        return _run("--perf" if enable else "--save")
     if enable:
         if plugin.perf_snapshot is None:
             plugin.perf_snapshot = {
@@ -291,15 +271,18 @@ def _apply_pstate(mode: str) -> bool:
 
 
 def _apply_pref(value: str) -> bool:
-    """EPP in active mode, cpufreq governor everywhere else."""
+    """EPP in active mode, cpufreq governor everywhere else.
+
+    Two different files, not two different tools: active mode takes an EPP
+    hint in energy_performance_preference, and guided/passive take a governor
+    name in scaling_governor. Writing one to the other is rejected, which is
+    why this branches on the file existing rather than on the mode name."""
     if _has_epp():
-        return _run("--epp", value)
+        return _write_all(EPP_LEAF, value)
     return _write_all("scaling_governor", value)
 
 
 def _apply_boost(enabled: bool) -> bool:
-    if _has_epp():
-        return _run("--boost", "1" if enabled else "0")
     return _write_boost(enabled)
 
 
@@ -420,14 +403,6 @@ def _apply_freq(min_mhz: int | None, max_mhz: int | None) -> bool:
     the sysfs path has to do it explicitly."""
     if max_mhz is not None:
         _ensure_boost_for(max_mhz)
-    if _has_epp():
-        if min_mhz is not None and max_mhz is not None:
-            return _run("--max-freq", str(max_mhz), "--min-freq", str(min_mhz))
-        if max_mhz is not None:
-            return _run("--max-freq", str(max_mhz))
-        if min_mhz is not None:
-            return _run("--min-freq", str(min_mhz))
-        return True
     ok = True
     if max_mhz is not None:
         ok = _write_all("scaling_max_freq", str(int(max_mhz) * 1000)) and ok
