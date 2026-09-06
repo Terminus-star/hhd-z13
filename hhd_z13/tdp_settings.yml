@@ -179,24 +179,48 @@ z13_tdp_auto:
           # exception for "keys that look safe" is how that bug returns.
           default: "z13_ac"
           options:
+            # Adjustor's three stock profiles are offered too -- "on battery,
+            # just use Silent" is a legitimate policy, and leaving them out
+            # would force anyone who wants it to burn a custom slot
+            # reproducing a profile that already exists.
+            #
+            # LABELS DELIBERATELY MATCH ADJUSTOR'S, NOT THE KEYS. Its keys and
+            # its titles do not agree: `balanced` is displayed as
+            # "Performance" and `performance` as "Turbo", following ASUS
+            # Armoury Crate's naming. Naming these by their keys would put two
+            # different meanings of "Performance" in one dropdown.
+            "quiet": Silent
+            "balanced": Performance
+            "performance": Turbo
             "z13_ac": Custom · Plugged In
             "z13_dc": Custom · On Battery
             "z13_game": Custom · Gaming
             "z13_alt": Custom · Alternate
           hint: >-
-            Which preset to select when the charger is plugged in.
+            Which mode to select when the charger is plugged in. Silent,
+            Performance and Turbo are adjustor's own firmware profiles, which
+            set a fan curve rather than a power limit.
         dc_preset:
           type: multiple
           title: On Battery
           tags: [dropdown]
           default: "z13_dc"
           options:
+            # Same list as On AC above, and the same label caveat: these are
+            # adjustor's visible titles, which do not match its internal keys.
+            "quiet": Silent
+            "balanced": Performance
+            "performance": Turbo
             "z13_ac": Custom · Plugged In
             "z13_dc": Custom · On Battery
             "z13_game": Custom · Gaming
             "z13_alt": Custom · Alternate
           hint: >-
-            Which preset to select when running on battery.
+            Which mode to select when running on battery. Note that KDE also
+            switches its own power profile on unplug, which adjustor maps onto
+            Silent; the preset chosen here is held across that for a few
+            seconds so it wins, and anything you pick by hand afterwards
+            still sticks.
 
 
 # Filled by tdp.py. Same mechanism adjustor uses for its own "Steam is

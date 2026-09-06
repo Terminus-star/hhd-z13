@@ -40,15 +40,36 @@ src = open(target).read()
 print(f"  target: {target}\n")
 
 table = z13.ADJUSTOR_ASUS_PATCHES
-ok(len(table) == 4, f"table has 4 entries ({len(table)})")
+ok(len(table) == len(set(e[0] for e in table)), "entry labels are unique")
 
-# --- anchors: present, and unique -----------------------------------------
-# Uniqueness matters because apply_marked() uses str.replace(..., 1). A second
-# occurrence would silently patch the wrong one.
-for entry in table:
-    label, anchor = entry[0], entry[1]
-    n = src.count(anchor)
-    ok(n == 1, f"anchor for {label!r} occurs exactly once", f"(found {n})")
+# The installed file is either pristine or already patched, and this suite has
+# to be meaningful in both states -- it is run on the machine, not only in a
+# clean checkout. Sentinels decide which.
+APPLIED = all(e[3] in src for e in table)
+print(f"  installed adjustor is {'PATCHED' if APPLIED else 'pristine'}\n")
+
+if APPLIED:
+    # Nothing to dry-run. Assert the applied state is coherent instead: no
+    # anchor left behind (which would mean a half-applied table), and the
+    # result still compiles as shipped.
+    for entry in table:
+        ok(entry[1] not in src,
+           f"anchor for {entry[0]!r} is consumed, not duplicated")
+    try:
+        compile(src, target, "exec")
+        ok(True, "installed patched source compiles")
+    except SyntaxError as e:
+        ok(False, "installed patched source compiles", f"{e}")
+    ok(z13.marked_state(target, table) == "PATCHED",
+       f"marked_state agrees ({z13.marked_state(target, table)})")
+else:
+    # --- anchors: present, and unique -------------------------------------
+    # Uniqueness matters because apply_marked() uses str.replace(..., 1). A
+    # second occurrence would silently patch the wrong one.
+    for entry in table:
+        label, anchor = entry[0], entry[1]
+        n = src.count(anchor)
+        ok(n == 1, f"anchor for {label!r} occurs exactly once", f"(found {n})")
 
 # --- every entry is a replace, and formats cleanly -------------------------
 for entry in table:
@@ -69,7 +90,12 @@ for entry in table:
     anchor, repl = entry[1], entry[2]
     out = out.replace(anchor, repl.format(mark=z13.MARK_TDP), 1)
 
-ok(out != src, "the patch changes the file")
+if APPLIED:
+    # This IS the idempotence check against the real installed file, which
+    # the pacman hook re-runs on every hhd upgrade.
+    ok(out == src, "re-applying over the installed patched file changes nothing")
+else:
+    ok(out != src, "the patch changes the file")
 
 try:
     compile(out, target, "exec")

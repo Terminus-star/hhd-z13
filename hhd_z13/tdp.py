@@ -48,6 +48,7 @@ REQUIRES THE ADJUSTOR PATCH
 
 import glob
 import logging
+import time
 
 from hhd.plugins import HHDPlugin, load_relative_yaml
 from hhd.plugins.conf import Config
@@ -63,6 +64,37 @@ PRESET_MODES = ("z13_ac", "z13_dc", "z13_game", "z13_alt")
 # apply path once patched. Kept here so the guard below reads the same way the
 # patch does.
 STOCK_MODES = ("quiet", "balanced", "performance")
+
+# What the power-change policy may select. The stock firmware profiles are
+# included deliberately: "on battery, just use Silent" is a legitimate policy,
+# and restricting the dropdown to our own slots would have forced someone who
+# wants it to burn a slot reproducing a profile adjustor already has.
+SELECTABLE_MODES = PRESET_MODES + STOCK_MODES
+
+# How long after a power transition the chosen mode is held against anything
+# that tries to move it.
+#
+# Not belt-and-braces -- this is load-bearing. Unplugging makes KDE switch its
+# power profile, which arrives as a "ppd" event ~3s later (measured on this
+# machine at 19:27:42, three seconds after the 19:27:39 unplug). adjustor's
+# notify() maps that onto quiet/balanced/performance and its update() then
+# FORCE-writes it over the config:
+#
+#     new_mode = self.new_mode
+#     ...
+#     elif new_mode:
+#         mode = new_mode
+#         conf["tdp.asus.tdp_v2.mode"] = mode
+#
+# It writes the value captured in notify() rather than reading the config, so
+# our prepare() write from an earlier tick is simply overwritten -- and being
+# edge-triggered, we had no reason to fire again. The symptom was "unplugging
+# selects Silent instead of the battery preset".
+#
+# The window is what separates the transition's own aftershocks from a genuine
+# later choice by the user, which must still win. 15s covers the observed 3s
+# echo plus adjustor's APPLY_DELAY and the 2s poll interval, with margin.
+HOLD_S = 15.0
 
 # adjustor's Z1_DATA min_tdp/max_tdp for "ROG Flow Z13 GZ302", and what it
 # clamps to while "Enforce Device TDP Limits" is on. Matching it exactly is
@@ -123,6 +155,8 @@ class Z13TdpPlugin(HHDPlugin):
         # None means "not established yet". Both are first-tick-adopts.
         self.old_ac = None
         self.old_mirror = None
+        # (target_mode, monotonic_deadline) while a transition is settling.
+        self._hold = None
         self._patched = None
         self._warned = False
 
@@ -176,7 +210,23 @@ class Z13TdpPlugin(HHDPlugin):
             # Re-arm, so turning the policy back on adopts the current power
             # source rather than firing a stale edge from before it was off.
             self.old_ac = None
+            self._hold = None
             return
+
+        # Hold the target across the transition's aftershocks. Checked before
+        # the edge logic because the thing that overwrites us arrives SEVERAL
+        # TICKS AFTER the edge, by which point old_ac is already updated and
+        # nothing would fire again.
+        if self._hold is not None:
+            target, until = self._hold
+            if time.monotonic() >= until:
+                self._hold = None
+            elif conf[MODE_PATH].to(str) != target:
+                logger.info(
+                    f"TDP mode was moved off {target} during the power "
+                    f"transition (KDE's power profile does this); re-asserting"
+                )
+                conf[MODE_PATH] = target
 
         ac = _on_ac()
         if ac is None:
@@ -196,7 +246,14 @@ class Z13TdpPlugin(HHDPlugin):
         self.old_ac = ac
         key = "ac_preset" if ac else "dc_preset"
         target = conf[f"{AUTO_PATH}.enabled.{key}"].to(str)
-        if target in PRESET_MODES and target != conf[MODE_PATH].to(str):
+        if target not in SELECTABLE_MODES:
+            return
+        # The hold is armed even when the mode is ALREADY the target. Nothing
+        # has been overwritten yet at this point -- the overwrite comes a few
+        # seconds later -- so arming only on a change would leave the common
+        # case (unplug, already on the battery preset) unprotected.
+        self._hold = (target, time.monotonic() + HOLD_S)
+        if target != conf[MODE_PATH].to(str):
             logger.info(
                 f"Power source -> {'AC' if ac else 'battery'}: TDP mode -> {target}"
             )

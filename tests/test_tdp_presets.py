@@ -88,7 +88,7 @@ ok(plugin(ready=False).settings() == {}, "contributes nothing until TDP is enabl
 # ==========================================================================
 # 2. The mirror
 # ==========================================================================
-def mkconf(mode="balanced", auto="disabled"):
+def mkconf(mode="balanced", auto="disabled", ac="z13_ac", dc="z13_dc"):
     presets = {
         p: {"tdp": d, "boost": True}
         for p, d in zip(t.PRESET_MODES, (45, 20, 60, 45))
@@ -98,7 +98,7 @@ def mkconf(mode="balanced", auto="disabled"):
             "tdp_v2": {"mode": mode, "custom": {"tdp": 45, "boost": True}, **presets},
             "z13_tdp_auto": {
                 "mode": auto,
-                "enabled": {"ac_preset": "z13_ac", "dc_preset": "z13_dc"},
+                "enabled": {"ac_preset": ac, "dc_preset": dc},
             },
             "z13_tdp_status": "",
         }},
@@ -149,10 +149,23 @@ ok(c[t.CUSTOM_TDP].to(int) == t.MAX_TDP,
 
 
 # ==========================================================================
-# 3. Auto-switch: edge-triggered, first tick adopts
+# 3. Auto-switch: edge-triggered, first tick adopts, holds the transition
 # ==========================================================================
 def with_ac(val):
     t._on_ac = lambda: val
+
+
+class _Clock:
+    """Controllable monotonic clock, so the hold window is testable without
+    sleeping through it."""
+    now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+clock = _Clock()
+t.time = clock  # tdp.py uses time.monotonic() and nothing else
 
 
 p = plugin()
@@ -162,6 +175,7 @@ p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_game",
    f"first tick adopts the power source and moves nothing ({c[t.MODE_PATH].to(str)})")
 
+clock.now += 60
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_game", "no transition, no change")
 
@@ -171,31 +185,83 @@ ok(c[t.MODE_PATH].to(str) == "z13_dc",
    f"unplugging switches to the battery preset ({c[t.MODE_PATH].to(str)})")
 ok(c[t.CUSTOM_TDP].to(int) == 20, "and its watts are mirrored in the same tick")
 
-# The whole answer to "don't fight the user": a hand-picked mode after a
-# transition stays picked until the NEXT transition.
-c[t.MODE_PATH] = "z13_game"
+# THE REGRESSION. Observed live: unplug at 19:27:39 selected z13_dc, then at
+# 19:27:42 KDE's power-profile change arrived as a "ppd" event, adjustor's
+# notify() mapped it to quiet, and its update() force-wrote that over the
+# config -- so unplugging landed on Silent. Being edge-triggered, nothing
+# fired again.
+c[t.MODE_PATH] = "quiet"          # what adjustor's ppd handler does to us
+clock.now += 3                    # the measured 3s delay
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_dc",
+   f"a ppd event during the transition is overridden ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 20, "and the preset's watts are restored with it")
+
+# ... but only for the window. A choice made later is a real choice.
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "quiet"
 p.prepare(c)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_game",
-   f"a mode picked by hand afterwards sticks ({c[t.MODE_PATH].to(str)})")
+ok(c[t.MODE_PATH].to(str) == "quiet",
+   f"after the window, a hand-picked mode sticks ({c[t.MODE_PATH].to(str)})")
 
 with_ac(True)
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_ac", "the next transition does take over again")
 
+# The hold arms even when the mode is ALREADY the target -- the overwrite
+# arrives seconds later, so arming only on a change would leave the common
+# case (unplug while already on the battery preset) unprotected.
+clock.now += 60
+with_ac(False)
+c[t.MODE_PATH] = "z13_dc"
+p.prepare(c)
+c[t.MODE_PATH] = "quiet"
+clock.now += 2
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_dc",
+   f"the hold arms even with no mode change to make ({c[t.MODE_PATH].to(str)})")
+
 # Unreadable power source must never guess.
+clock.now += 60
 c[t.MODE_PATH] = "z13_game"
 with_ac(None)
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_game", "an unreadable charger changes nothing")
 
+# Stock firmware profiles are legitimate targets.
+clock.now += 60
+with_ac(True)
+c3 = mkconf(mode="z13_game", auto="enabled", ac="quiet", dc="performance")
+p3 = plugin()
+p3.prepare(c3)
+before = c3[t.CUSTOM_TDP].to(int)   # whatever the previous preset left there
+with_ac(False)
+p3.prepare(c3)
+ok(c3[t.MODE_PATH].to(str) == "performance",
+   f"a stock profile can be the battery target ({c3[t.MODE_PATH].to(str)})")
+# Switching to a firmware profile must not touch custom.tdp: adjustor owns
+# those modes outright and writes only a fan curve for them.
+ok(c3[t.CUSTOM_TDP].to(int) == before,
+   f"selecting a stock profile mirrors nothing ({before} -> {c3[t.CUSTOM_TDP].to(int)})")
+clock.now += 60
+with_ac(True)
+p3.prepare(c3)
+ok(c3[t.MODE_PATH].to(str) == "quiet",
+   f"and the AC target too ({c3[t.MODE_PATH].to(str)})")
+
+for m in t.STOCK_MODES:
+    ok(m in t.SELECTABLE_MODES, f"{m!r} is selectable as a power-change target")
+
 # Disabled policy re-arms, so turning it back on adopts rather than firing a
 # stale edge from before it was switched off.
+clock.now += 60
 with_ac(True)
 c2 = mkconf(mode="z13_game", auto="disabled")
 p2 = plugin()
 p2.prepare(c2)
 ok(p2.old_ac is None, "a disabled policy holds no edge state")
+ok(p2._hold is None, "and holds nothing")
 with_ac(False)
 p2.prepare(c2)
 ok(c2[t.MODE_PATH].to(str) == "z13_game", "a disabled policy never switches")
