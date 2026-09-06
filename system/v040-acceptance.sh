@@ -62,7 +62,7 @@ else
   grep -qF 'time.perf_counter() + APPLY_DELAY' "$ASUS_DRV" \
     && p "AC/DC re-apply clock" "perf_counter" \
     || f "AC/DC re-apply clock" "still time.time()"
-  grep -qF '_z13_s = conf.get("tdp.asus.tdp_v2.custom.z13_sppt", 0)' "$ASUS_DRV" \
+  grep -qF '_z13_a = _z13_json.load(_z13_fd)' "$ASUS_DRV" \
     && p "manual PL2/PL3 override" "present" \
     || f "manual PL2/PL3 override" "a preset set to Manual will have PL2/PL3 derived"
 
@@ -119,18 +119,27 @@ print("STOCKMODES " + ",".join(sorted(tv.get("modes", {}))))
 # z13_presets container at the container level would mean the superseded
 # layout is back.
 cust = tv.get("modes", {}).get("custom", {}).get("children", {})
-print("PRESETCTL " + str("z13_active" in cust))
-print("SIBLING " + str("z13_presets" in asus))
-print("AUTOCTL " + str("z13_auto" in cust))
-# adjustor's own sliders are hidden, since the active preset drives the same
-# two values and both showing would stack two TDP sliders in one menu.
-print("HIDDEN " + str("hide" in cust.get("tdp", {}).get("tags", [])
-                      and "hide" in cust.get("boost", {}).get("tags", [])))
+print("PRESETCTL " + str("z13_preset" in cust))
+# The power-change policy is its own area, not nested in Custom -- it has to
+# be reachable from any mode, including the one KDE flips you to on unplug.
+print("POWERCTL " + str("z13_power" in asus))
+print("POWERNEST " + str("z13_power" in cust))
+# There must be exactly ONE TDP control in this menu. Two means the preset
+# grew its own slider back alongside adjustor's.
+print("TDPCTLS " + ",".join(sorted(k for k in cust if "tdp" in k.lower())))
+# ...and none hiding inside a slot. The duplicate that prompted this layout
+# was a per-slot slider, not a sibling, so counting siblings alone would miss
+# its return.
+_sl = (cust.get("z13_preset", {}) or {}).get("modes", {}) or {}
+print("SLOTKIDS " + str(sum(len((v or {}).get("children", {}) or {}) for v in _sl.values())))
+# Power Limits is gated on TDP Boost: with boost off all three limits are the
+# same number, so the control is dropped from the tree rather than shown inert.
+print("BOOST " + str(stval("tdp.asus.tdp_v2.custom.boost")))
+print("PPTCTL " + str("z13_ppt" in cust))
+print("APPLIEDTYPE " + str(cust.get("z13_applied", {}).get("type")))
 
-slots = sorted(cust.get("z13_active", {}).get("modes", {}))
+slots = sorted(cust.get("z13_preset", {}).get("modes", {}))
 print("SLOTS " + ",".join(slots))
-print("COUNT " + str(stval("tdp.asus.tdp_v2.custom.z13_count",
-                          cust.get("z13_count", {}).get("default"))))
 
 mode = stval("tdp.asus.tdp_v2.mode") or tv.get("default")
 print("MODE " + str(mode))
@@ -138,15 +147,21 @@ print("MODE " + str(mode))
 # Only Custom is driven by a preset. On any other mode adjustor owns the
 # limits outright and there is nothing of ours to assert.
 if mode == "custom":
-    pid = stval("tdp.asus.tdp_v2.custom.z13_active.mode") or "p1"
-    print("ACTIVE " + str(pid))
-    watts = stval(f"tdp.asus.tdp_v2.custom.z13_active.{pid}.tdp")
-    if not isinstance(watts, int):
-        watts = cust.get("z13_active", {}).get("modes", {}).get(pid, {}) \
-                    .get("children", {}).get("tdp", {}).get("default")
-    print("WATTS " + str(watts))
-    print("PPT %s %s" % (stval("tdp.asus.tdp_v2.custom.z13_sppt", 0),
-                         stval("tdp.asus.tdp_v2.custom.z13_fppt", 0)))
+    print("ACTIVE " + str(stval("tdp.asus.tdp_v2.custom.z13_preset.mode") or "p1"))
+    # adjustor's own slider is the single editor, so it IS the target.
+    print("WATTS " + str(stval("tdp.asus.tdp_v2.custom.tdp")))
+    # The PL2/PL3 targets live in the plugin's store, which is also what the
+    # patch reads -- deliberately not in the settings tree, because anything
+    # declared there renders as an editable second source of truth.
+    try:
+        with open("/etc/hhd/z13-tdp-presets.json") as f:
+            st_j = json.load(f)
+        ap = st_j.get("applied") or {}
+        print("TARGETS %s %s" % (ap.get("sppt", 0), ap.get("fppt", 0)))
+        print("NSTORED " + str(len(st_j.get("presets") or [])))
+    except Exception as e:
+        print("TARGETS unreadable " + str(e))
+print("APPLIED " + str(stval("tdp.asus.tdp_v2.custom.z13_applied") or ""))
 print("STATUS " + str(stval("tdp.asus.tdp_v2.custom.z13_status") or ""))
 PY
 )
@@ -163,24 +178,46 @@ else
 
   [ "$(echo "$EVAL" | sed -n 's/^PRESETCTL //p')" = "True" ] \
     && p "presets inside Custom" "present" \
-    || f "presets inside Custom" "z13_active missing from custom"
-  [ "$(echo "$EVAL" | sed -n 's/^SIBLING //p')" = "False" ] \
-    && p "no concurrent preset menu" "collapsed under Custom" \
-    || f "no concurrent preset menu" "z13_presets still a sibling container"
-  [ "$(echo "$EVAL" | sed -n 's/^HIDDEN //p')" = "True" ] \
-    && p "adjustor's duplicate sliders" "hidden" \
-    || w "adjustor's duplicate sliders" "visible — two TDP sliders in one menu"
-  [ "$(echo "$EVAL" | sed -n 's/^AUTOCTL //p')" = "True" ] \
-    && p "power-change policy control" "present" \
-    || f "power-change policy control" "z13_auto missing"
+    || f "presets inside Custom" "z13_preset missing from custom"
+
+  # Exactly one TDP control. Two means a preset grew its own slider back
+  # beside adjustor's, which is the duplication this layout exists to remove.
+  TDPCTLS=$(echo "$EVAL" | sed -n 's/^TDPCTLS //p')
+  SLOTKIDS=$(echo "$EVAL" | sed -n 's/^SLOTKIDS //p')
+  if [ "$TDPCTLS" = "tdp" ] && [ "${SLOTKIDS:-0}" = "0" ]; then
+    p "one TDP control in the menu" "tdp; slots carry no controls"
+  else
+    f "one TDP control in the menu" "siblings=$TDPCTLS, controls inside slots=${SLOTKIDS:-?}"
+  fi
+
+  [ "$(echo "$EVAL" | sed -n 's/^POWERCTL //p')" = "True" ] \
+    && p "power-change policy" "in its own area" \
+    || f "power-change policy" "z13_power missing"
+  [ "$(echo "$EVAL" | sed -n 's/^POWERNEST //p')" = "False" ] \
+    && p "policy not buried in Custom" "sibling of the TDP Mode selector" \
+    || f "policy not buried in Custom" "still nested inside custom"
+
+  # Boost off means PL1 = PL2 = PL3, so Power Limits is dropped from the tree
+  # rather than left sitting there doing nothing.
+  BOOST=$(echo "$EVAL" | sed -n 's/^BOOST //p')
+  PPTCTL=$(echo "$EVAL" | sed -n 's/^PPTCTL //p')
+  case "$BOOST:$PPTCTL" in
+    True:True|False:False) p "Power Limits gated on TDP Boost" "boost=$BOOST, shown=$PPTCTL" ;;
+    *) f "Power Limits gated on TDP Boost" "boost=$BOOST but shown=$PPTCTL" ;;
+  esac
+
+  [ "$(echo "$EVAL" | sed -n 's/^APPLIEDTYPE //p')" = "display" ] \
+    && p "Applied is read-only telemetry" "display" \
+    || f "Applied is read-only telemetry" "$(echo "$EVAL" | sed -n 's/^APPLIEDTYPE //p')"
 
   SLOTS=$(echo "$EVAL" | sed -n 's/^SLOTS //p')
-  COUNT=$(echo "$EVAL" | sed -n 's/^COUNT //p')
+  NSTORED=$(echo "$EVAL" | sed -n 's/^NSTORED //p')
   NSLOT=$(echo "$SLOTS" | tr ',' '\n' | grep -c .)
-  # The slot list is generated from the stored count, so a disagreement means
-  # a rebuild was missed and Add/Remove has silently stopped working.
-  [ "$NSLOT" = "$COUNT" ] && p "preset slots match the count" "$NSLOT ($SLOTS)" \
-                          || f "preset slots match the count" "$NSLOT slots vs count=$COUNT"
+  # The slot list is generated from the store, so a disagreement means a
+  # rebuild was missed and Add/Remove has silently stopped working.
+  if [ -z "$NSTORED" ]; then s "slots match the store" "not on Custom"
+  elif [ "$NSLOT" = "$NSTORED" ]; then p "slots match the store" "$NSLOT ($SLOTS)"
+  else f "slots match the store" "$NSLOT slots vs $NSTORED stored"; fi
 
   BANNER=$(echo "$EVAL" | sed -n 's/^STATUS //p')
   [ -z "$BANNER" ] && p "preset status banner" "clear" \
@@ -204,8 +241,10 @@ else
   else
     f "PL1 matches the preset" "ppt_pl1_spl=${SPL:-?} W, expected $WATTS W"
   fi
-  PPT=$(echo "$EVAL" | sed -n 's/^PPT //p')
-  [ -n "$PPT" ] && i_ "published PL2/PL3" "$PPT  (0 0 = derived by adjustor)"
+  TGT=$(echo "$EVAL" | sed -n 's/^TARGETS //p')
+  [ -n "$TGT" ] && i_ "PL2/PL3 targets in the store" "$TGT  (0 0 = derived by adjustor)"
+  APP=$(echo "$EVAL" | sed -n 's/^APPLIED //p')
+  [ -n "$APP" ] && i_ "Applied (as the QAM shows it)" "$APP"
 
   # Informational only. With boost on, adjustor derives these as
   # min(max(spl,35), spl*1.4) -- a no-op at >=35 W, a partial boost below --

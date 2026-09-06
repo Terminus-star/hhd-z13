@@ -12,52 +12,67 @@ false version is the intuitive one and it will be reinvented otherwise.
 
 ## 1. What it does
 
-Presets are **user-created value sets**, applied through adjustor's own Custom
+Presets are **user-created value sets** applied through adjustor's own Custom
 mode. Add and remove them from the QAM; the list is not fixed.
-
-They live **inside** adjustor's Custom mode, not beside it — selecting Custom
-is selecting the presets:
 
 ```
 Asus TDP
-└─ TDP Mode  [ Custom  ▾ ]           ← adjustor's own dropdown, unmodified
-     Preset   [ Preset 2 ▾ ]
-        TDP (PL1, sustained)  [===   ]  9 W
-        TDP Boost             [x]
-        Power Limits          [ Manual ▾ ]
-           PL2 (short boost)  [====  ] 12 W
-           PL3 (fast boost)   [===== ] 15 W
-     [ Add Preset ]  [ Remove Preset ]
-     Preset Slots  [ 2 ]
-     Applied PL2 / PL3   12 W / 15 W
-     Preset on Power Change  [ Enabled ▾ ]
-        On AC       [ Preset 1 ▾ ]
-        On Battery  [ Preset 2 ▾ ]
+├─ TDP Mode  [ Custom ▾ ]        ← adjustor's own dropdown, unmodified
+│    TDP        [====  ]  9 W    ← adjustor's slider: the ONE editor
+│    TDP Boost  [x]              ← adjustor's toggle: gates PL2/PL3
+│    Preset     [ Preset 2 ▾ ]
+│    Power Limits [ Auto ▾ ]     ← only while TDP Boost is on
+│    Applied     9 / 11 / 13 W   (PL1 / PL2 / PL3)   ← live telemetry
+│    [ Add Preset ]  [ Remove Preset ]
+└─ Preset on Power Change  [ Enabled ▾ ]   ← its own area
+     On AC       [ Preset 1 ▾ ]
+     On Battery  [ Preset 2 ▾ ]
 ```
 
-adjustor's own `TDP` and `TDP Boost` sliders are **hidden**, because the active
-preset drives those same two values and showing both would stack two TDP
-sliders in one menu. That is a tag override through the merge, not a patch:
-`pick_tag` takes `tags` from whoever merges last, while `type`, `min`, `max`,
-`default` and `title` all fall through from adjustor's definition because we
-omit them. Disable this plugin and its sliders come straight back.
+### One slider, not two
 
-The power-change policy sits here too, so the presets have exactly one home.
-The trade-off is that it is only *visible* under Custom — it keeps working from
-any mode, because the plugin reads the stored config rather than what is on
-screen.
+adjustor's Custom mode renders its own TDP and TDP Boost controls, and they
+are what drive the hardware. So **they are the editor**: selecting a preset
+LOADS its stored values into them, and editing them SAVES back into the
+selected preset.
 
-Each preset carries PL1 (5–65 W), a boost flag, and an **auto/manual gate for
-PL2/PL3**. Auto lets adjustor derive them; Manual states all three outright,
-which is the only way to get a meaningful split at or above 35 W (see §6).
+An earlier attempt gave each preset its own sliders and hid adjustor's by
+tagging them `hide`. **That does not work** — verified against the live tree,
+where the tags read `['hide']` and hhd-ui rendered the controls anyway. `hide`
+is honoured for hhd's own `version` field and evidently not for ordinary
+controls, so a duplicate can only be removed structurally.
 
-The power-change policy is **disabled by default** and **edge-triggered**: it
-acts on a plug/unplug transition and never continuously, so a change made by
-hand afterwards stays. Its targets are the presets *plus* adjustor's three
-stock profiles, so "on battery, just use Silent" is expressible without
-burning a slot.
+### TDP Boost gates Power Limits
 
-**hhd-z13 writes no PPT registers at all.** That is the design — see §3.
+With boost off, PL1 = PL2 = PL3 — there is no short or fast limit to
+configure. So Power Limits is **omitted from the tree entirely** while boost
+is off, rather than left sitting there inert. hhd fixes the tree when
+`settings()` runs, so the plugin emits `{"type": "settings"}` when the toggle
+moves, which is the same mechanism Add/Remove use.
+
+### Applied is telemetry, not controls
+
+The three limits are derived from the preset, so editable copies would be a
+second source of truth racing the first. `Applied` is a read-only `display`
+fed from `/sys/devices/platform/asus-nb-wmi/` — the same interface adjustor
+writes — on the same contract as the refresh-rate indicator: read the
+hardware, show it, never write it. It is only rewritten when the text changes,
+because every config write wakes hhd's long-poll and redraws the UI.
+
+### Where presets are stored
+
+In the plugin's own JSON file (`/etc/hhd/z13-tdp-presets.json`), not in the
+settings tree. Anything declared in that tree renders, and per-slot values are
+state rather than controls — putting them there is precisely what forced the
+second set of sliders to appear. The same file carries the PL2/PL3 targets the
+patch reads, so adjustor takes them from one place instead of from config keys
+that would have to render somewhere.
+
+### Power change lives outside Custom
+
+It selects *which* preset to apply, so it has to be reachable from any mode —
+including the one KDE flips you to on unplug. It sits beside adjustor's TDP
+Mode selector rather than inside Custom.
 
 ## 2. Two corrections that reshaped this
 
@@ -145,10 +160,18 @@ previous preset's wattage.
 
 hhd fixes a mode's entries when `settings()` runs, so a dynamic list is only
 possible by asking hhd to rebuild the tree — emitting `{"type": "settings"}`,
-exactly as adjustor does when its own options change. The count is persisted
-as an ordinary setting, read back in `update()`, and a disagreement with what
-was last generated triggers exactly one rebuild. Add seeds the new slot from
-the active one, so a new preset starts from something useful.
+exactly as adjustor does when its own options change.
+
+The slot list is generated from the store's length, so Add and Remove edit the
+store and then request one rebuild. Add seeds the new slot from the active one,
+so a new preset starts from something useful rather than a default nobody
+chose; Remove refuses to delete the last, and steps the selection back first if
+it is deleting the selected one — otherwise `validate_config` would reset the
+selection and the result would look arbitrary.
+
+The same mechanism gates Power Limits on TDP Boost. That is the only way to
+get conditional visibility: the tree is fixed at `settings()` time, so a
+control can only appear or disappear by rebuilding it.
 
 ## 4. The floor is 5 W, not 28
 

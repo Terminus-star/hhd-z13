@@ -1,15 +1,17 @@
 """Tests for the TDP preset plugin.
 
-Run: python3 tests/test_tdp_presets.py   (no root, no writes, no hardware)
+Run: python3 tests/test_tdp_presets.py   (no root, no writes outside a tmpdir)
 
-The plugin writes no hardware by design -- it only sets config keys adjustor
-reads -- so everything is exercised against a real Config and a real merge
-against adjustor's OWN settings.yml. _on_ac is stubbed; nothing else is.
+The plugin writes no hardware -- it sets config keys adjustor reads, plus one
+JSON store. The store is redirected into a tmpdir and the sysfs reader is
+stubbed, so nothing on the machine is touched.
 """
 
 import glob
+import json
 import os
 import sys
+import tempfile
 
 import yaml
 
@@ -21,6 +23,9 @@ from hhd.plugins.conf import Config
 
 from hhd_z13 import tdp as t
 
+TMP = tempfile.mkdtemp(prefix="z13tdp-")
+t.STORE_PATH = os.path.join(TMP, "presets.json")
+
 fail = 0
 
 
@@ -31,41 +36,42 @@ def ok(cond, msg, detail=""):
         fail += 1
 
 
-def plugin(ready=True, count=2):
+def fresh_store(presets=None):
+    try:
+        os.unlink(t.STORE_PATH)
+    except FileNotFoundError:
+        pass
+    if presets is not None:
+        with open(t.STORE_PATH, "w") as f:
+            json.dump({"presets": presets, "applied": {"sppt": 0, "fppt": 0}}, f)
+
+
+def plugin(ready=True, boost=True):
     p = t.Z13TdpPlugin()
     p._tdp_ready = ready
-    p._count = count
+    p._gen_boost = boost
     p.events = []
     p.emit = p.events.append
     return p
 
 
-def slot(w=45, boost=True, ppt="auto", sppt=45, fppt=45):
-    return {
-        "tdp": w, "boost": boost,
-        "ppt": {"mode": ppt, "manual": {"sppt": sppt, "fppt": fppt}},
-    }
-
-
-def mkconf(mode="balanced", auto="disabled", ac="p1", dc="p2", active="p1",
-           count=2, slots=None):
-    slots = slots or {"p1": slot(45), "p2": slot(20)}
+def mkconf(mode="balanced", power="disabled", ac="p1", dc="p2", preset="p1",
+           tdp=45, boost=True, ppt="auto", sppt=0, fppt=0):
     return Config({
         "tdp": {"asus": {
             "tdp_v2": {"mode": mode, "custom": {
-                # adjustor's own two, which the preset writes into and which
-                # are hidden from the UI so they do not duplicate its sliders
-                "tdp": 45, "boost": True,
-                # ours, merged in beside them
-                "z13_active": {"mode": active, **slots},
-                "z13_count": count, "z13_add": False, "z13_remove": False,
-                "z13_sppt": 0, "z13_fppt": 0,
-                "z13_auto": {
-                    "mode": auto,
-                    "enabled": {"ac_preset": ac, "dc_preset": dc},
-                },
+                # adjustor's own two -- the single editor
+                "tdp": tdp, "boost": boost,
+                # ours
+                "z13_preset": {"mode": preset},
+                "z13_ppt": {"mode": ppt, "manual": {"sppt": sppt, "fppt": fppt}},
+                "z13_applied": "", "z13_add": False, "z13_remove": False,
                 "z13_status": "",
             }},
+            "z13_power": {
+                "mode": power,
+                "enabled": {"ac_preset": ac, "dc_preset": dc},
+            },
         }},
         "hhd": {"settings": {"tdp_ready": True}},
     })
@@ -74,33 +80,41 @@ def mkconf(mode="balanced", auto="disabled", ac="p1", dc="p2", active="p1",
 # ==========================================================================
 # 1. The generated tree
 # ==========================================================================
-s = plugin(count=3).settings()
-kids = s["tdp"]["asus"]["children"]["tdp_v2"]["modes"]["custom"]["children"]
-modes = kids["z13_active"]["modes"]
-ok(sorted(modes) == ["p1", "p2", "p3"], f"count drives the slot list ({sorted(modes)})")
-ok(modes["p2"]["title"] == "Preset 2", f"slots are titled ({modes['p2']['title']!r})")
+fresh_store()
+s = plugin().settings()
+asus = s["tdp"]["asus"]["children"]
+kids = asus["tdp_v2"]["modes"]["custom"]["children"]
 
-# deepcopy per slot, not a YAML alias: the tree is walked and annotated in
-# several places, so shared dict objects would be a latent aliasing bug.
-modes["p1"]["children"]["tdp"]["default"] = 999
-ok(modes["p2"]["children"]["tdp"]["default"] != 999,
-   "slots are independent objects, not aliases")
+ok(sorted(kids["z13_preset"]["modes"]) == ["p1", "p2"],
+   f"slots come from the store ({sorted(kids['z13_preset']['modes'])})")
 
-pt = modes["p1"]["children"]
-ok(pt["tdp"]["min"] == t.MIN_TDP and pt["tdp"]["max"] == t.MAX_TDP,
-   f"PL1 spans adjustor's enforced range ({pt['tdp']['min']}..{pt['tdp']['max']})")
-ok(sorted(pt["ppt"]["modes"]) == ["auto", "manual"], "PL2/PL3 have an auto/manual gate")
-ok(sorted(pt["ppt"]["modes"]["manual"]["children"]) == ["fppt", "sppt"],
-   "manual exposes PL2 and PL3")
+# THE fix for the duplicate sliders: a slot carries no controls of its own.
+# adjustor's TDP / TDP Boost are the single editor; the slot is storage.
+ok(all("children" not in v for v in kids["z13_preset"]["modes"].values()),
+   "slot containers are EMPTY — no second TDP slider")
+ok("tdp" not in kids and "boost" not in kids,
+   f"we contribute no TDP/boost control of our own ({sorted(kids)})")
 
-opts = kids["z13_auto"]["modes"]["enabled"]["children"]["ac_preset"]["options"]
-ok(sorted(opts) == ["balanced", "p1", "p2", "p3", "performance", "quiet"],
-   f"power-change targets are presets + stock profiles ({sorted(opts)})")
-# adjustor's keys and titles disagree; using its titles avoids two different
-# meanings of "Performance" in one list.
-ok(opts["balanced"] == "Performance" and opts["performance"] == "Turbo"
-   and opts["quiet"] == "Silent",
-   f"stock profiles use adjustor's own labels ({[opts[k] for k in t.STOCK_MODES]})")
+# The power-change policy is its own area, not nested in Custom: it has to be
+# reachable from any mode, including the one KDE flips you to on unplug.
+ok("z13_power" in asus, "power-change policy is a sibling, in its own area")
+ok("z13_power" not in kids, "and NOT buried inside Custom")
+
+opts = asus["z13_power"]["modes"]["enabled"]["children"]["ac_preset"]["options"]
+ok(sorted(opts) == ["balanced", "p1", "p2", "performance", "quiet"],
+   f"targets are presets + stock profiles ({sorted(opts)})")
+ok(opts["balanced"] == "Performance" and opts["performance"] == "Turbo",
+   "stock profiles use adjustor's own labels, which disagree with its keys")
+
+# Boost is what makes PL2/PL3 differ from PL1 at all, so with it off the
+# control has nothing to say and is dropped rather than shown inert.
+ok("z13_ppt" in kids, "Power Limits shown while boost is on")
+off = plugin(boost=False).settings()["tdp"]["asus"]["children"]["tdp_v2"]["modes"]["custom"]["children"]
+ok("z13_ppt" not in off, f"Power Limits GONE while boost is off ({sorted(off)})")
+ok("z13_applied" in off, "telemetry stays either way")
+
+ok(kids["z13_applied"]["type"] == "display",
+   f"Applied is telemetry, not sliders ({kids['z13_applied']['type']})")
 
 ok(plugin(ready=False).settings() == {}, "contributes nothing until TDP is enabled")
 
@@ -108,233 +122,199 @@ ok(plugin(ready=False).settings() == {}, "contributes nothing until TDP is enabl
 hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/drivers/asus/settings.yml"))
 if hits:
     base = {"tdp": {"asus": yaml.safe_load(open(hits[-1]))}}
+    fresh_store()
     m = merge_settings([base, plugin().settings()])
-    asus = m["tdp"]["asus"]
-    ok(asus.get("title") == "Asus TDP", "adjustor's container title survives")
-    tv = asus["children"]["tdp_v2"]
+    a = m["tdp"]["asus"]
+    tv = a["children"]["tdp_v2"]
+    ok(a.get("title") == "Asus TDP", "adjustor's container title survives")
     ok(sorted(tv["modes"]) == ["balanced", "custom", "performance", "quiet"],
-       f"adjustor's dropdown is UNTOUCHED -- no preset modes ({sorted(tv['modes'])})")
-    ok("tdp" in tv["modes"]["custom"]["children"], "the mirror target still exists")
-    ok("fan" in asus["children"], "adjustor's fan curve survives")
-    cust = tv["modes"]["custom"]["children"]
-    ok("z13_active" in cust, "presets merged INSIDE Custom, not beside it")
-    ok("z13_presets" not in asus["children"],
-       "no second concurrent menu at the container level")
-    # adjustor's own sliders drive the same two values the active preset does,
-    # so both showing would stack two TDP sliders in one menu. Tags are
-    # overridden through the merge; everything else falls through from
-    # adjustor, which is what keeps this a merge rather than a patch.
-    ok("hide" in cust["tdp"].get("tags", []),
-       f"adjustor's duplicate TDP slider is hidden ({cust['tdp'].get('tags')})")
-    ok("hide" in cust["boost"].get("tags", []),
-       f"adjustor's duplicate boost toggle is hidden ({cust['boost'].get('tags')})")
-    # Bounds must come from adjustor's definition, untouched. Note these are
-    # its YAML PLACEHOLDERS -- it overwrites them at runtime inside settings()
-    # from Z1_DATA, giving the real 5..65 -- which is exactly why this compares
-    # against adjustor's own file rather than a hardcoded pair.
-    raw = yaml.safe_load(open(hits[-1]))["children"]["tdp_v2"]["modes"]["custom"]["children"]["tdp"]
-    ok(cust["tdp"].get("min") == raw["min"] and cust["tdp"].get("max") == raw["max"],
-       f"and keeps adjustor's own bounds, untouched "
-       f"({cust['tdp'].get('min')}..{cust['tdp'].get('max')})")
-    ok(cust["tdp"].get("title") == raw.get("title"),
-       f"and its title ({cust['tdp'].get('title')!r})")
+       f"adjustor's dropdown UNTOUCHED ({sorted(tv['modes'])})")
+    cu = tv["modes"]["custom"]["children"]
+    raw = yaml.safe_load(open(hits[-1]))["children"]["tdp_v2"]["modes"]["custom"]["children"]
+    ok(cu["tdp"].get("min") == raw["tdp"]["min"]
+       and cu["tdp"].get("tags") == raw["tdp"].get("tags", []),
+       "adjustor's TDP slider is left completely alone now")
+    ok(len([k for k in cu if "tdp" in k.lower()]) == 1,
+       f"exactly one TDP control in the menu ({[k for k in cu if 'tdp' in k.lower()]})")
+    ok("z13_preset" in cu, "presets merged inside Custom")
+    ok("fan" in a["children"], "adjustor's fan curve survives")
 else:
     print("  SKIP  adjustor not installed (merge checks)")
 
 
 # ==========================================================================
-# 2. Applying a preset
+# 2. Load / save against adjustor's sliders
 # ==========================================================================
+fresh_store([{"tdp": 45, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0},
+             {"tdp": 9, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0}])
 p = plugin()
-c = mkconf(active="p1")
+c = mkconf(preset="p1", tdp=45)
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "balanced",
-   "first tick adopts and applies nothing (hhd starting must not change TDP)")
+   "first tick adopts: hhd starting changes nothing")
 
-c["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 9
+c[t.PRESET] = "p2"
 p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == 9, f"editing a preset applies it ({c[t.CUSTOM_TDP].to(int)})")
-ok(c[t.MODE_PATH].to(str) == "custom", "and selects adjustor's Custom mode")
-# Auto scales from THIS panel's firmware proportions (60/75/86 W shipped),
-# not from a fixed ceiling. 9 W -> 11/13.
-ok((c[t.SPPT].to(int), c[t.FPPT].to(int)) == (11, 13),
-   f"Auto scales PL2/PL3 from the panel's own ratios "
-   f"({c[t.SPPT].to(int)}, {c[t.FPPT].to(int)})")
-
-# The value that matters: at 45 W a fixed 35 W ceiling would give 45/45/45,
-# i.e. the boost flag doing nothing at the wattage this machine runs at most.
-p_ = plugin()
-c_ = mkconf(active="p1", slots={"p1": slot(20), "p2": slot(20)})
-p_.prepare(c_)
-c_["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 45
-p_.prepare(c_)
-ok((c_[t.CUSTOM_TDP].to(int), c_[t.SPPT].to(int), c_[t.FPPT].to(int)) == (45, 56, 64),
-   f"45 W yields real headroom, not 45/45/45 "
-   f"({c_[t.CUSTOM_TDP].to(int)}/{c_[t.SPPT].to(int)}/{c_[t.FPPT].to(int)})")
-
-# Ceilings are the firmware's own max_value figures.
-c_["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 65
-p_.prepare(c_)
-ok(c_[t.SPPT].to(int) <= t.MAX_SPPT and c_[t.FPPT].to(int) <= t.MAX_FPPT,
-   f"capped at the firmware maxima "
-   f"({c_[t.SPPT].to(int)} <= {t.MAX_SPPT}, {c_[t.FPPT].to(int)} <= {t.MAX_FPPT})")
-
-# Boost off means one flat limit, at every wattage.
-p_ = plugin()
-c_ = mkconf(active="p1", slots={"p1": slot(45, boost=False), "p2": slot(20)})
-p_.prepare(c_)
-c_["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 46
-p_.prepare(c_)
-ok(c_[t.SPPT].to(int) == 46 and c_[t.FPPT].to(int) == 46,
-   f"boost off gives one flat limit ({c_[t.SPPT].to(int)}, {c_[t.FPPT].to(int)})")
-
-# THE KDE TOLERANCE. adjustor's ppd handler force-writes a stock mode over the
-# config on every power transition. Stock Custom survives that because the
-# quiet branch writes only a fan curve and never touches PPT -- the wattage
-# stays. We must inherit that by NOT fighting for the label; re-asserting
-# would be an endless loop against KDE for no gain.
-c[t.MODE_PATH] = "quiet"
-p.prepare(c)
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "quiet",
-   f"the mode is never re-asserted once applied ({c[t.MODE_PATH].to(str)})")
-ok(c[t.CUSTOM_TDP].to(int) == 9, "and the applied wattage is untouched")
-
-# --- manual PL2/PL3 -------------------------------------------------------
-p = plugin()
-c = mkconf(active="p1", slots={"p1": slot(30, ppt="manual", sppt=50, fppt=70),
-                               "p2": slot(20)})
-p.prepare(c)
-c["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 31
-p.prepare(c)
-ok((c[t.SPPT].to(int), c[t.FPPT].to(int)) == (50, 70),
-   f"manual limits are published verbatim ({c[t.SPPT].to(int)}, {c[t.FPPT].to(int)})")
-
-# The firmware REJECTS a lower tier exceeding a higher one rather than
-# clamping, so a nonsensical order would silently apply nothing.
-p = plugin()
-c = mkconf(active="p1", slots={"p1": slot(60, ppt="manual", sppt=10, fppt=5),
-                               "p2": slot(20)})
-p.prepare(c)
-c["tdp.asus.tdp_v2.custom.z13_active.p1.tdp"] = 61
-p.prepare(c)
-w, sp, fp = c[t.CUSTOM_TDP].to(int), c[t.SPPT].to(int), c[t.FPPT].to(int)
-ok(w <= sp <= fp, f"PL1 <= PL2 <= PL3 is enforced before writing ({w}, {sp}, {fp})")
-
-
-# ==========================================================================
-# 3. Auto-switch
-# ==========================================================================
-def with_ac(val):
-    t._on_ac = lambda: val
-
-
-p = plugin()
-c = mkconf(auto="enabled", ac="p1", dc="p2", active="p1")
-with_ac(True)
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "balanced", "first tick adopts the power source only")
-
-with_ac(False)
-p.prepare(c)
-ok(c["tdp.asus.tdp_v2.custom.z13_active.mode"].to(str) == "p2",
-   f"unplugging selects the battery preset ({c[t.ACTIVE].to(str)})")
-ok(c[t.CUSTOM_TDP].to(int) == 20, f"and applies it ({c[t.CUSTOM_TDP].to(int)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9,
+   f"selecting a preset loads it into adjustor's slider ({c[t.CUSTOM_TDP].to(int)})")
 ok(c[t.MODE_PATH].to(str) == "custom", "and selects Custom")
 
-# The transition must re-assert even when the VALUES are unchanged, because
-# the mode may have been moved off custom in between.
-c[t.MODE_PATH] = "quiet"
-with_ac(True)
+# There is only one slider, so editing it is the only way to edit a preset.
+c[t.CUSTOM_TDP] = 20
 p.prepare(c)
-with_ac(False)
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "custom",
-   "a transition re-asserts Custom even with identical values")
+saved = json.load(open(t.STORE_PATH))["presets"][1]["tdp"]
+ok(saved == 20, f"editing the slider saves into the active preset ({saved})")
 
-# A stock profile is a legitimate target.
+c[t.PRESET] = "p1"
+p.prepare(c)
+ok(c[t.CUSTOM_TDP].to(int) == 45,
+   f"the other preset keeps its own value ({c[t.CUSTOM_TDP].to(int)})")
+c[t.PRESET] = "p2"
+p.prepare(c)
+ok(c[t.CUSTOM_TDP].to(int) == 20, f"and the edit persisted ({c[t.CUSTOM_TDP].to(int)})")
+
+# A load must never be mistaken for an edit, or switching presets would
+# overwrite the one you switched away from.
+ok(json.load(open(t.STORE_PATH))["presets"][0]["tdp"] == 45,
+   "switching presets does not overwrite the previous one")
+
+
+# ==========================================================================
+# 3. The three limits
+# ==========================================================================
 p = plugin()
-c = mkconf(auto="enabled", ac="quiet", dc="performance", active="p1")
+ok(p._limits(45, True, "auto", 0, 0) == (56, 64),
+   f"Auto uses this panel's ratios ({p._limits(45, True, 'auto', 0, 0)})")
+ok(p._limits(9, True, "auto", 0, 0) == (11, 13),
+   f"...at any wattage ({p._limits(9, True, 'auto', 0, 0)})")
+ok(p._limits(65, True, "auto", 0, 0) == (81, 93),
+   f"...capped at the firmware maxima ({p._limits(65, True, 'auto', 0, 0)})")
+# The case that matters: a fixed 35 W ceiling would make this 45/45/45.
+ok(p._limits(45, True, "auto", 0, 0) != (45, 45), "45 W is not flattened")
+ok(p._limits(45, False, "auto", 0, 0) == (45, 45),
+   "boost off means one flat limit — which is why Power Limits is hidden then")
+ok(p._limits(30, True, "manual", 10, 5) == (30, 30),
+   f"PL1 <= PL2 <= PL3 enforced ({p._limits(30, True, 'manual', 10, 5)})")
+ok(p._limits(30, True, "manual", 50, 70) == (50, 70), "manual values pass through")
+
+# The patch reads the store, so the targets must land there.
+fresh_store([{"tdp": 45, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0}])
+p = plugin()
+c = mkconf(preset="p1", tdp=45)
+p.prepare(c)
+c[t.CUSTOM_TDP] = 46
+p.prepare(c)
+app = json.load(open(t.STORE_PATH))["applied"]
+ok(app == {"sppt": 58, "fppt": 66}, f"targets published for the patch ({app})")
+
+
+# ==========================================================================
+# 4. Telemetry
+# ==========================================================================
+t._read_w = lambda a: {"ppt_pl1_spl": 45, "ppt_pl2_sppt": 56, "ppt_fppt": 64}[a]
+p = plugin()
+c = mkconf()
+p.update(c)
+ok(c[t.APPLIED].to(str).startswith("45 / 56 / 64 W"),
+   f"Applied reads the hardware back ({c[t.APPLIED].to(str)!r})")
+
+# Every config write wakes hhd's long-poll and redraws the UI, so an unchanged
+# reading must not be rewritten.
+c[t.APPLIED] = "sentinel"
+p.update(c)
+ok(c[t.APPLIED].to(str) == "sentinel", "unchanged telemetry is not rewritten")
+
+t._read_w = lambda a: None
+p2 = plugin()
+c2 = mkconf()
+p2.update(c2)
+ok(c2[t.APPLIED].to(str) == "unavailable", "unreadable hardware says so")
+
+
+# ==========================================================================
+# 5. Add / remove, and the boost gate rebuild
+# ==========================================================================
+t._read_w = lambda a: 45
+fresh_store([{"tdp": 9, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0},
+             {"tdp": 20, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0}])
+p = plugin()
+c = mkconf(preset="p1")
+c[t.ADD] = True
+p.update(c)
+st = json.load(open(t.STORE_PATH))["presets"]
+ok(len(st) == 3, f"Add grows the store ({len(st)})")
+ok(st[2]["tdp"] == 9, f"and seeds from the active slot ({st[2]['tdp']})")
+ok(any(e.get("type") == "settings" for e in p.events),
+   "and asks hhd to rebuild — the slot list is fixed at settings() time")
+
+p = plugin()
+c = mkconf(preset="p3")
+c[t.REMOVE] = True
+p.update(c)
+ok(len(json.load(open(t.STORE_PATH))["presets"]) == 2, "Remove shrinks the store")
+ok(c[t.PRESET].to(str) == "p2",
+   f"removing the SELECTED slot steps the selection back ({c[t.PRESET].to(str)})")
+
+fresh_store([{"tdp": 9, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0}])
+p = plugin()
+c = mkconf()
+c[t.REMOVE] = True
+p.update(c)
+ok(len(json.load(open(t.STORE_PATH))["presets"]) == 1,
+   "the last preset cannot be removed")
+
+# Toggling boost rebuilds the tree once, so Power Limits appears or goes.
+p = plugin(boost=True)
+c = mkconf(boost=False)
+p.update(c)
+n = len([e for e in p.events if e.get("type") == "settings"])
+ok(n == 1, f"toggling boost rebuilds the tree ({n})")
+p.update(c)
+ok(len([e for e in p.events if e.get("type") == "settings"]) == 1,
+   "and only once, not on every tick")
+
+
+# ==========================================================================
+# 6. Power change, and robustness
+# ==========================================================================
+def with_ac(v):
+    t._on_ac = lambda: v
+
+
+fresh_store([{"tdp": 45, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0},
+             {"tdp": 9, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0}])
+p = plugin()
+c = mkconf(power="enabled", ac="p1", dc="p2", preset="p1")
 with_ac(True)
 p.prepare(c)
+ok(c[t.PRESET].to(str) == "p1", "first tick adopts the power source only")
 with_ac(False)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "performance",
-   f"a stock profile can be the battery target ({c[t.MODE_PATH].to(str)})")
+ok(c[t.PRESET].to(str) == "p2",
+   f"unplugging selects the battery preset ({c[t.PRESET].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, f"and loads it ({c[t.CUSTOM_TDP].to(int)})")
+ok(c[t.MODE_PATH].to(str) == "custom", "and selects Custom")
 
 with_ac(None)
-before = c[t.MODE_PATH].to(str)
+before = c[t.PRESET].to(str)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == before, "an unreadable charger changes nothing")
+ok(c[t.PRESET].to(str) == before, "an unreadable charger changes nothing")
 
 p2 = plugin()
-c2 = mkconf(auto="disabled", active="p1")
+c2 = mkconf(power="disabled")
 with_ac(True)
 p2.prepare(c2)
 ok(p2.old_ac is None, "a disabled policy holds no edge state")
 
+# A corrupt store must self-heal rather than take the plugin down.
+with open(t.STORE_PATH, "w") as f:
+    f.write("{ not json")
+p3 = plugin()
+ok(len(p3._load_store()["presets"]) >= 1, "a corrupt store falls back to defaults")
 
-# ==========================================================================
-# 4. Add / remove
-# ==========================================================================
-p = plugin(count=2)
-c = mkconf(count=2, active="p1", slots={"p1": slot(9), "p2": slot(20)})
-c[t.ADD] = True
-p.update(c)
-ok(c[t.COUNT].to(int) == 3, f"Add grows the list ({c[t.COUNT].to(int)})")
-ok(any(e.get("type") == "settings" for e in p.events),
-   "and asks hhd to rebuild the tree (the list is fixed at settings() time)")
-ok(c["tdp.asus.tdp_v2.custom.z13_active.p3.tdp"].to(int) == 9,
-   "a new slot is seeded from the active one, not from a default nobody chose")
-
-p = plugin(count=2)
-c = mkconf(count=2, active="p2")
-c[t.REMOVE] = True
-p.update(c)
-ok(c[t.COUNT].to(int) == 1, f"Remove shrinks the list ({c[t.COUNT].to(int)})")
-ok(c[t.ACTIVE].to(str) == "p1",
-   f"removing the SELECTED slot steps the selection back ({c[t.ACTIVE].to(str)})")
-
-p = plugin(count=1)
-c = mkconf(count=1, active="p1", slots={"p1": slot(9)})
-c[t.REMOVE] = True
-p.update(c)
-ok(c[t.COUNT].to(int) == 1, "the last preset cannot be removed")
-
-p = plugin(count=t.MAX_PRESETS)
-c = mkconf(count=t.MAX_PRESETS, active="p1")
-c[t.ADD] = True
-p.update(c)
-ok(c[t.COUNT].to(int) == t.MAX_PRESETS, f"capped at {t.MAX_PRESETS}")
-
-# An externally edited count (or one restored from state.yml at startup) must
-# rebuild exactly once, not every tick.
-p = plugin(count=2)
-c = mkconf(count=5)
-p.update(c)
-ok(p._count == 5, f"the stored count is adopted ({p._count})")
-n = len([e for e in p.events if e.get("type") == "settings"])
-p.update(c)
-ok(len([e for e in p.events if e.get("type") == "settings"]) == n,
-   "and rebuilds once, not on every tick")
-
-
-# ==========================================================================
-# 5. The missing-patch banner
-# ==========================================================================
-for state, expect in ((False, t.PATCH_WARNING), (True, ""), (None, "")):
-    p = plugin()
-    c = mkconf()
-    t._adjustor_is_patched = lambda: state
-    p._patched = None
-    p.update(c)
-    label = {False: "unpatched is reported", True: "patched shows nothing",
-             None: "unanswerable makes no claim"}[state]
-    ok(c[t.STATUS].to(str) == expect, label)
-
-p = plugin()
+p4 = plugin()
 try:
-    p.prepare(Config({}))
+    p4.prepare(Config({}))
     ok(True, "prepare() survives an empty config")
 except Exception as e:
     ok(False, "prepare() survives an empty config", repr(e))

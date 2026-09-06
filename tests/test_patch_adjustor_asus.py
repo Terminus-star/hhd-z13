@@ -74,10 +74,12 @@ for entry in table:
         #     install.sh --revert then re-apply.
         #   - upstream genuinely moved the anchor, which needs a new one.
         #
-        # The prefix up to the first "(" is the stable part of a sentinel
-        # across revisions -- the arguments are what tend to change.
-        stem = sentinel.split("(")[0]
-        if len(stem) > 8 and stem in src:
+        # The MARK is what stays stable: a revision may replace the whole
+        # mechanism (config keys -> a store file, say), so matching on any
+        # part of the sentinel text is not reliable. If the mark is in the
+        # file but this entry is neither applicable nor applied, an older
+        # revision of the table put it there.
+        if z13.MARK_TDP in src:
             ok(True, f"{label!r} has a SUPERSEDED revision installed",
                "harmless; hhd-patches/install.sh --revert then re-apply")
         else:
@@ -114,7 +116,7 @@ for entry in table:
     label, anchor, _, sentinel = entry[:4]
     if sentinel in out:
         ok(True, f"sentinel for {label!r} present afterwards")
-    elif anchor not in src and sentinel.split("(")[0] in src:
+    elif anchor not in src and z13.MARK_TDP in src:
         # Superseded revision in place: its anchor is already consumed, so a
         # dry-run cannot produce the new sentinel. Reported above; not a
         # second failure here.
@@ -149,7 +151,8 @@ ok("elif boost:" in out, "upstream's derived-limits branch is preserved")
 # Prefix match: tolerates both upstream's `if mode == "custom":` and the
 # widened form left behind by a superseded release (see below).
 gate = out.find('if mode == "custom"')
-ok(gate != -1 and out.find("_z13_s = conf.get") > gate,
+marker = max(out.find("_z13_s = conf.get"), out.find("_z13_a = _z13_json.load"))
+ok(gate != -1 and marker > gate,
    "the override sits inside the custom apply path")
 
 # Presets became stored value sets applied through adjustor's own Custom mode,

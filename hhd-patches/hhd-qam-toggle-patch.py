@@ -620,20 +620,32 @@ ADJUSTOR_ASUS_PATCHES = (
         "                self.queue_tdp = None\n                if boost:\n",
         """\
                 self.queue_tdp = None
-                # {mark}: explicit PL2/PL3 when an hhd-z13 preset supplies
-                # them. hhd-z13 computes all three from this machine's own
-                # firmware figures (60/75/86 W shipped, 92/93 W maxima) rather
-                # than from the derived pair below, whose fixed 35 W ceiling
-                # sits under this machine's sustained range and makes the
-                # boost flag inert from 35 W upward.
+                # {mark}: the three power limits, computed by hhd-z13 from
+                # this machine's own firmware figures (60/75/86 W shipped,
+                # 92/93 W maxima) rather than from the derived pair below,
+                # whose fixed 35 W ceiling sits under this machine's sustained
+                # range and makes the boost flag inert from 35 W upward.
+                #
+                # Read from a file rather than the config tree because these
+                # are derived values, not controls: anything declared in the
+                # settings tree renders in the QAM, and a second editable copy
+                # of a limit is a second source of truth. hhd-z13 publishes
+                # them here and shows the LIVE values back as read-only
+                # telemetry instead.
                 #
                 # Both must be non-zero to take effect, so the stock Custom
-                # mode -- which never writes them -- keeps upstream behaviour
-                # exactly. Ordering (PL1 <= PL2 <= PL3) is enforced by the
-                # producer, because the firmware rejects a lower tier that
-                # exceeds a higher one rather than clamping it.
-                _z13_s = conf.get("tdp.asus.tdp_v2.custom.z13_sppt", 0)
-                _z13_f = conf.get("tdp.asus.tdp_v2.custom.z13_fppt", 0)
+                # mode -- with no preset applied and no file -- keeps upstream
+                # behaviour exactly. Ordering (PL1 <= PL2 <= PL3) is enforced
+                # by the producer, because the firmware rejects a lower tier
+                # that exceeds a higher one rather than clamping it.
+                try:
+                    import json as _z13_json
+                    with open("/etc/hhd/z13-tdp-presets.json") as _z13_fd:
+                        _z13_a = _z13_json.load(_z13_fd).get("applied") or {{}}
+                    _z13_s = int(_z13_a.get("sppt", 0))
+                    _z13_f = int(_z13_a.get("fppt", 0))
+                except Exception:
+                    _z13_s = _z13_f = 0
                 if _z13_s and _z13_f:
                     time.sleep(TDP_DELAY)
                     set_tdp("fast", FTDP_FN, _z13_f)
@@ -643,7 +655,7 @@ ADJUSTOR_ASUS_PATCHES = (
                     set_tdp("steady", CTDP_FN, steady)
                 elif boost:
 """,
-        '_z13_s = conf.get("tdp.asus.tdp_v2.custom.z13_sppt", 0)',
+        '_z13_a = _z13_json.load(_z13_fd)',
         "replace",
     ),
     (
