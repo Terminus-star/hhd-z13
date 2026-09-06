@@ -564,12 +564,40 @@ ADJUSTOR_FUSE_PATCHES = (
 #   wattage survives, which is the behaviour stock Custom has always had.
 #
 # ENTRY 1 -- per-preset PL2/PL3.
-#   Upstream derives the short and fast limits from the sustained value via a
-#   MAX_TDP_BOOST constant chosen for the ROG Ally, which collapses all three
-#   to the same number at or above 35 W. A preset wanting explicit limits
-#   publishes them on two config keys; when both are non-zero they are written
-#   instead of the derived pair. Absent or zero, upstream behaviour is
-#   untouched -- including for the stock Custom mode, which never sets them.
+#   Upstream derives the short and fast limits as
+#       min(max(steady, MAX_TDP_BOOST), int(steady * RATIO))
+#   with MAX_TDP_BOOST = 35, FPPT_BOOST = 35/25, SPPT_BOOST = 30/25.
+#
+#   MAX_TDP_BOOST is not a boost amount, it is the CEILING of the boost range,
+#   and 35 is the ROG Ally's *maximum* TDP -- as are the ratios, which are that
+#   device's 30 W and 35 W limits over its 25 W performance tier. On an Ally
+#   the ceiling sits above every sustained value the slider can reach, so the
+#   min() picks the ratio-scaled number and boost works throughout.
+#
+#   The Z13's sustained range reaches 65 W. For anything at or above 35 W the
+#   ceiling is BELOW the sustained value itself, so the expression collapses to
+#   min(steady, steady * ratio) = steady and all three limits become equal:
+#
+#       PL1     as shipped        with a 65 W ceiling
+#        9 W -> 10 / 12            11 / 12
+#       20 W -> 24 / 28            25 / 28
+#       45 W -> 45 / 45  (inert)   56 / 64
+#       65 W -> 65 / 65  (inert)   65 / 65
+#
+#   So this is not "the Z13 happens to differ" -- the constant encodes another
+#   machine's hardware limits. This device's own firmware defaults are
+#   60/75/86 W, i.e. ratios of 1.25 and 1.433 against a 93 W ceiling, so the
+#   RATIOS are nearly right and only the ceiling is wrong.
+#
+#   Upstream even has the field for it: DeviceTDP carries `max_tdp_boost`, but
+#   it is None for every device in the table and the code never reads it. That
+#   makes the per-device fix a genuinely small upstream change, and a better
+#   one than this patch -- but it needs numbers for hardware we cannot measure,
+#   so hhd-z13 lets a preset state all three outright instead.
+#
+#   A preset publishes them on two config keys; both non-zero selects them.
+#   Absent or zero, upstream behaviour is untouched -- including for the stock
+#   Custom mode, which never sets them.
 #
 # ENTRIES 2-3 -- an upstream bug, and a hard prerequisite for retiring
 # z13-hibernate's tdp-restore.sh.

@@ -57,10 +57,15 @@ preset_template:
       title: TDP Boost
       default: True
       hint: >-
-        Lets the short and fast limits rise above the sustained one. Only has
-        an effect BELOW 35 W: adjustor derives them with a constant chosen for
-        the ROG Ally, so at 35 W and above all three collapse to the same
-        number. Ignored entirely when Power Limits below is set to Manual.
+        Lets the short and fast limits rise above the sustained one. On this
+        machine it only has an effect BELOW 35 W. adjustor caps the boost
+        range at the ROG Ally's maximum TDP of 35 W, which is above anything
+        that device can sustain but well inside this one's 5-65 W range, so
+        from 35 W up the cap sits below the sustained value and all three
+        limits come out equal. At 45 W you get 45/45/45. Use Manual below to
+        state them yourself -- 45/56/64 is roughly what this panel's own
+        firmware ratios would give. Ignored entirely when Power Limits is set
+        to Manual.
 
     ppt:
       type: mode

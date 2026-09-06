@@ -42,11 +42,27 @@ WHY THE PRESET LIST CAN CHANGE AT RUNTIME
     a disagreement with what was last generated triggers exactly one rebuild.
 
 PL2/PL3
-    Upstream derives the short and fast limits from the sustained value using
-    MAX_TDP_BOOST = 35, an ROG Ally constant, so they collapse to the same
-    number at or above 35 W. A preset set to Manual publishes all three on two
-    config keys that the z13-tdp-presets patch reads. Both zero means derive,
-    which is what the stock Custom mode always gets.
+    Upstream derives the short and fast limits as
+        min(max(steady, MAX_TDP_BOOST), int(steady * RATIO))
+
+    MAX_TDP_BOOST is not a boost amount, it is the CEILING of the boost range,
+    and 35 is the ROG Ally's MAXIMUM TDP -- as are the ratios (35/25 and 30/25,
+    that device's limits over its 25 W performance tier). On an Ally the
+    ceiling is above everything the slider can reach, so boost works
+    throughout.
+
+    This machine sustains up to 65 W. At or above 35 W the ceiling is below
+    the sustained value itself, so the expression collapses to
+    min(steady, steady * ratio) = steady and all three limits come out equal:
+    45 W yields 45/45/45. The Z13's own firmware defaults are 60/75/86 W --
+    ratios of 1.25 and 1.433 against a 93 W ceiling -- so the ratios are
+    nearly right and only the ceiling is another machine's.
+
+    adjustor already has the field for a fix (DeviceTDP.max_tdp_boost) but it
+    is None for every device and is never read. Rather than guess numbers for
+    hardware we cannot measure, a preset set to Manual states all three
+    outright on two config keys the z13-tdp-presets patch reads. Both zero
+    means derive, which is what the stock Custom mode always gets.
 """
 
 import glob
