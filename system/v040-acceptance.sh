@@ -62,9 +62,19 @@ else
   grep -qF 'time.perf_counter() + APPLY_DELAY' "$ASUS_DRV" \
     && p "AC/DC re-apply clock" "perf_counter" \
     || f "AC/DC re-apply clock" "still time.time()"
+  grep -qF '_z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)' "$ASUS_DRV" \
+    && p "manual PL2/PL3 override" "present" \
+    || f "manual PL2/PL3 override" "a preset set to Manual will have PL2/PL3 derived"
+
+  # Presets became stored value sets applied through adjustor's own Custom
+  # mode, so the entries that widened its mode dispatch were dropped. The
+  # patcher only adds what the current table names and never removes what an
+  # older one applied, so a superseded widening can linger. Harmless -- with
+  # no preset modes it can never match -- but it is dead code between this
+  # machine and upstream.
   grep -qF 'if mode == "custom" or (mode and mode not in' "$ASUS_DRV" \
-    && p "preset modes reach the writer" "custom apply path widened" \
-    || f "preset modes reach the writer" "presets would set Turbo and write no PPT"
+    && w "superseded mode widening" "still installed; hhd-patches/install.sh --revert then re-apply" \
+    || p "superseded mode widening" "absent"
 fi
 
 # ─────────────────────────────────────────── 2/3. the tree, and the live PPT
@@ -75,7 +85,6 @@ hd "2. Presets are in adjustor's dropdown, and applied"
 # the QAM shows. Both files it needs are world-readable.
 EVAL=$(python3 - <<'PY' 2>/dev/null
 import json, urllib.request
-PRESETS = ("z13_ac", "z13_dc", "z13_game", "z13_alt")
 try:
     tok = open("/etc/hhd/.token").read().strip()
     def get(ep):
@@ -88,14 +97,11 @@ except Exception as e:
     raise SystemExit
 
 try:
-    tv = se["tdp"]["asus"]["children"]["tdp_v2"]
+    asus = se["tdp"]["asus"]["children"]
+    tv = asus["tdp_v2"]
 except Exception:
     print("ERR no tdp.asus.tdp_v2 in the settings tree")
     raise SystemExit
-
-modes = tv.get("modes", {})
-print("MODES " + ",".join(sorted(modes)))
-print("AUTOCTL " + str("z13_tdp_auto" in se["tdp"]["asus"]["children"]))
 
 def stval(path, default=None):
     d = st
@@ -105,14 +111,34 @@ def stval(path, default=None):
         d = d[k]
     return d
 
+# adjustor's own dropdown must be UNTOUCHED. Presets are stored value sets
+# applied through its Custom mode, not extra modes -- that is what makes them
+# survive KDE's power-profile change on unplug.
+print("STOCKMODES " + ",".join(sorted(tv.get("modes", {}))))
+print("PRESETCTL " + str("z13_presets" in asus))
+print("AUTOCTL " + str("z13_tdp_auto" in asus))
+
+pres = asus.get("z13_presets", {}).get("children", {})
+slots = sorted(pres.get("active", {}).get("modes", {}))
+print("SLOTS " + ",".join(slots))
+print("COUNT " + str(stval("tdp.asus.z13_presets.count",
+                          pres.get("count", {}).get("default"))))
+
 mode = stval("tdp.asus.tdp_v2.mode") or tv.get("default")
 print("MODE " + str(mode))
-if mode in PRESETS:
-    slot = modes.get(mode, {}).get("children", {}).get("tdp", {})
-    watts = stval(f"tdp.asus.tdp_v2.{mode}.tdp")
+
+# Only Custom is driven by a preset. On any other mode adjustor owns the
+# limits outright and there is nothing of ours to assert.
+if mode == "custom":
+    pid = stval("tdp.asus.z13_presets.active.mode") or "p1"
+    print("ACTIVE " + str(pid))
+    watts = stval(f"tdp.asus.z13_presets.active.{pid}.tdp")
     if not isinstance(watts, int):
-        watts = slot.get("default")
+        watts = pres.get("active", {}).get("modes", {}).get(pid, {}) \
+                    .get("children", {}).get("tdp", {}).get("default")
     print("WATTS " + str(watts))
+    print("PPT %s %s" % (stval("tdp.asus.z13_presets.sppt", 0),
+                         stval("tdp.asus.z13_presets.fppt", 0)))
 print("STATUS " + str(stval("tdp.asus.z13_tdp_status") or ""))
 PY
 )
@@ -120,16 +146,26 @@ PY
 if echo "$EVAL" | grep -q '^ERR'; then
   s "settings tree" "$(echo "$EVAL" | sed -n 's/^ERR //p')"
 else
-  MODES=$(echo "$EVAL" | sed -n 's/^MODES //p')
-  MISSING=""
-  for m in quiet balanced performance custom z13_ac z13_dc z13_game z13_alt; do
-    echo "$MODES" | grep -q "\b$m\b" || MISSING="$MISSING $m"
-  done
-  [ -z "$MISSING" ] && p "eight modes in one dropdown" "$MODES" \
-                    || f "eight modes in one dropdown" "missing:$MISSING"
+  # adjustor's dropdown must be exactly its own four modes. A preset mode
+  # appearing here would mean the superseded design is back, and with it the
+  # bug where unplugging landed on Silent.
+  [ "$(echo "$EVAL" | sed -n 's/^STOCKMODES //p')" = "balanced,custom,performance,quiet" ] \
+    && p "adjustor's dropdown untouched" "balanced,custom,performance,quiet" \
+    || f "adjustor's dropdown untouched" "$(echo "$EVAL" | sed -n 's/^STOCKMODES //p')"
+
+  [ "$(echo "$EVAL" | sed -n 's/^PRESETCTL //p')" = "True" ] \
+    && p "preset container" "present" || f "preset container" "z13_presets missing"
   [ "$(echo "$EVAL" | sed -n 's/^AUTOCTL //p')" = "True" ] \
     && p "power-change policy control" "present" \
     || f "power-change policy control" "z13_tdp_auto missing"
+
+  SLOTS=$(echo "$EVAL" | sed -n 's/^SLOTS //p')
+  COUNT=$(echo "$EVAL" | sed -n 's/^COUNT //p')
+  NSLOT=$(echo "$SLOTS" | tr ',' '\n' | grep -c .)
+  # The slot list is generated from the stored count, so a disagreement means
+  # a rebuild was missed and Add/Remove has silently stopped working.
+  [ "$NSLOT" = "$COUNT" ] && p "preset slots match the count" "$NSLOT ($SLOTS)" \
+                          || f "preset slots match the count" "$NSLOT slots vs count=$COUNT"
 
   BANNER=$(echo "$EVAL" | sed -n 's/^STATUS //p')
   [ -z "$BANNER" ] && p "preset status banner" "clear" \
@@ -139,15 +175,22 @@ else
   WATTS=$(echo "$EVAL" | sed -n 's/^WATTS //p')
   hd "3. Live power limit — read through the interface we wrote"
   i_ "active TDP mode" "$MODE"
+  [ -n "$(echo "$EVAL" | sed -n 's/^ACTIVE //p')" ] \
+    && i_ "active preset" "$(echo "$EVAL" | sed -n 's/^ACTIVE //p')"
   SPL=$(cat "$NBWMI/ppt_pl1_spl" 2>/dev/null)
   if [ -z "${WATTS:-}" ]; then
-    s "PL1 matches the preset" "not on a preset mode (nothing to assert)"
-    i_ "asus-nb-wmi ppt_pl1_spl" "${SPL:-unreadable}"
+    # Expected whenever KDE has flipped the label: the mode reads Silent while
+    # the preset's wattage is still in force, because adjustor's quiet branch
+    # writes a fan curve and never touches PPT. Not a failure.
+    s "PL1 matches the preset" "not on Custom — adjustor owns the limit here"
+    i_ "asus-nb-wmi ppt_pl1_spl" "${SPL:-unreadable} W"
   elif [ "$SPL" = "$WATTS" ]; then
     p "PL1 matches the preset" "ppt_pl1_spl=$SPL W, expected $WATTS W"
   else
     f "PL1 matches the preset" "ppt_pl1_spl=${SPL:-?} W, expected $WATTS W"
   fi
+  PPT=$(echo "$EVAL" | sed -n 's/^PPT //p')
+  [ -n "$PPT" ] && i_ "published PL2/PL3" "$PPT  (0 0 = derived by adjustor)"
 
   # Informational only. With boost on, adjustor derives these as
   # min(max(spl,35), spl*1.4) -- a no-op at >=35 W, a partial boost below --

@@ -2,11 +2,15 @@
 
 Run: python3 tests/test_patch_adjustor_asus.py   (no root, no writes)
 
-Nothing is written. The live file is read, the table is applied in memory, and
-the result is compiled and inspected. This is the check that would have caught
-an anchor that is off by one character -- apply_marked() aborts the whole table
-on a missing anchor, so a bad entry takes the other three down with it and
-leaves the machine unpatched with no obvious reason why.
+Nothing is written. The live file is read, the table applied in memory, and
+the result compiled and inspected. This is the check that catches an anchor
+that is off by one character -- apply_marked() aborts the whole table on a
+missing anchor, so one bad entry takes the others down with it and leaves the
+machine unpatched with no obvious reason why.
+
+State is judged PER ENTRY, not all-or-nothing. The installed file is routinely
+mixed: the table gains and loses entries between releases while the pacman
+hook keeps re-applying whatever the current table says.
 """
 
 import importlib.util
@@ -37,20 +41,35 @@ except SystemExit as e:
     sys.exit(0)
 
 src = open(target).read()
+table = z13.ADJUSTOR_ASUS_PATCHES
 print(f"  target: {target}\n")
 
-table = z13.ADJUSTOR_ASUS_PATCHES
-ok(len(table) == 4, f"table has 4 entries ({len(table)})")
+ok(len(table) == len(set(e[0] for e in table)), "entry labels are unique")
 
-# --- anchors: present, and unique -----------------------------------------
-# Uniqueness matters because apply_marked() uses str.replace(..., 1). A second
-# occurrence would silently patch the wrong one.
+# --- per-entry state ------------------------------------------------------
+# Exactly one of "anchor present" / "sentinel present" must hold. Neither
+# means the upstream code moved and this entry can no longer be applied OR
+# verified -- the failure mode worth catching, because apply_marked() would
+# abort the whole table on it.
+pristine = []
 for entry in table:
-    label, anchor = entry[0], entry[1]
-    n = src.count(anchor)
-    ok(n == 1, f"anchor for {label!r} occurs exactly once", f"(found {n})")
+    label, anchor, _, sentinel = entry[:4]
+    has_anchor, has_sentinel = anchor in src, sentinel in src
+    if has_sentinel:
+        ok(True, f"{label!r} already applied")
+    elif has_anchor:
+        n = src.count(anchor)
+        # Uniqueness matters: apply_marked uses str.replace(..., 1), so a
+        # second occurrence would silently patch the wrong one.
+        ok(n == 1, f"{label!r} anchor present and unique", f"(found {n})")
+        pristine.append(entry)
+    else:
+        ok(False, f"{label!r} is applicable",
+           "neither anchor nor sentinel found — upstream moved")
 
-# --- every entry is a replace, and formats cleanly -------------------------
+print(f"\n  {len(pristine)} of {len(table)} entries would be applied now\n")
+
+# --- bodies format --------------------------------------------------------
 for entry in table:
     label = entry[0]
     mode = entry[4] if len(entry) > 4 else "insert"
@@ -60,16 +79,13 @@ for entry in table:
         ok(z13.MARK_TDP in body, f"{label!r} carries the mark")
     except (KeyError, IndexError) as e:
         # The classic failure: a literal brace in the body that was not
-        # doubled, so .format() tries to interpret it as a field.
+        # doubled, so .format() reads it as a field.
         ok(False, f"{label!r} body formats", f"undoubled brace? {e!r}")
 
-# --- apply in memory ------------------------------------------------------
+# --- apply the outstanding entries in memory ------------------------------
 out = src
-for entry in table:
-    anchor, repl = entry[1], entry[2]
-    out = out.replace(anchor, repl.format(mark=z13.MARK_TDP), 1)
-
-ok(out != src, "the patch changes the file")
+for entry in pristine:
+    out = out.replace(entry[1], entry[2].format(mark=z13.MARK_TDP), 1)
 
 try:
     compile(out, target, "exec")
@@ -78,42 +94,52 @@ except SyntaxError as e:
     ok(False, "patched source compiles", f"{e}")
 
 for entry in table:
-    ok(entry[3] in out, f"sentinel for {entry[0]!r} present after patching")
+    ok(entry[3] in out, f"sentinel for {entry[0]!r} present afterwards")
 
-ok(z13.marked_state.__call__ is not None, "marked_state is available")
+ok(z13.marked_state(out.__class__ and target, table) is not None,
+   "marked_state is callable against the target")
 
 # --- idempotence ----------------------------------------------------------
 # The pacman hook re-runs this on every hhd upgrade, so a second pass over an
 # already-patched file must be a no-op rather than nesting the replacement.
-missing = [e[0] for e in table if e[3] not in out]
-ok(not missing, f"marked_state would report PATCHED ({missing})")
-
 again = out
 for entry in table:
     again = again.replace(entry[1], entry[2].format(mark=z13.MARK_TDP), 1)
 ok(again == out, "re-applying over a patched file changes nothing")
 
-# --- the behaviour the two preset entries exist to produce ----------------
-STOCK = ("quiet", "balanced", "performance")
-
-
-def reaches_custom_branch(mode):
-    """Mirror the patched guard, so the intent is asserted, not just the text."""
-    return mode == "custom" or (mode and mode not in STOCK)
-
-
-for m in STOCK:
-    ok(not reaches_custom_branch(m), f"stock mode {m!r} keeps its own path")
-ok(reaches_custom_branch("custom"), "custom still reaches the PPT write")
-for m in ("z13_ac", "z13_dc", "z13_game", "z13_alt"):
-    ok(reaches_custom_branch(m), f"preset {m!r} reaches the PPT write")
-ok(not reaches_custom_branch(None), "None writes no PPT, as upstream had it")
-
-# --- the clock fix --------------------------------------------------------
+# --- what the entries are for ---------------------------------------------
+# The clock fix. Asserted on the RESULT rather than the diff, so it holds
+# whether the entry was already applied or applied just now.
 ok("time.time() + SLEEP_DELAY" not in out, "wakeup arm no longer uses the epoch clock")
 ok("time.time() + APPLY_DELAY" not in out, "AC/DC arm no longer uses the epoch clock")
 ok(out.count("time.perf_counter()") >= 3,
-   f"drain and both arms now share one clock ({out.count('time.perf_counter()')} uses)")
+   f"drain and both arms share one clock ({out.count('time.perf_counter()')} uses)")
+
+# The PL2/PL3 override must be INSIDE the custom apply path and must leave
+# upstream's derived pair reachable, or the stock Custom mode changes
+# behaviour -- which this patch must never do.
+ok("elif boost:" in out, "upstream's derived-limits branch is preserved")
+# Prefix match: tolerates both upstream's `if mode == "custom":` and the
+# widened form left behind by a superseded release (see below).
+gate = out.find('if mode == "custom"')
+ok(gate != -1 and out.find("_z13_s = conf.get") > gate,
+   "the override sits inside the custom apply path")
+
+# Presets became stored value sets applied through adjustor's own Custom mode,
+# so the two entries that widened its mode dispatch were dropped. An installed
+# file can still carry them: the patcher only ever adds what the CURRENT table
+# names, and never removes what an older one applied.
+#
+# Harmless -- with no preset modes in the tree the widened guard can never
+# match anything -- but it is dead code standing between this machine and
+# upstream, so say so rather than let it accumulate silently.
+STALE = 'if mode == "custom" or (mode and mode not in'
+if STALE in out:
+    ok(True, "NOTE: a superseded widening is still installed",
+       "harmless; clear it with hhd-patches/install.sh --revert then re-apply")
+else:
+    ok('if mode == "custom":' in out,
+       "adjustor's mode dispatch is left alone — presets no longer need it")
 
 print("\n  RESULT: " + ("ALL PASS" if not fail else f"{fail} FAILURE(S)"))
 sys.exit(1 if fail else 0)
