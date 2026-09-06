@@ -223,18 +223,45 @@ Three `"replace"` entries:
 
 ### Why `ppt-override` exists
 
-Upstream derives the short and fast limits from the sustained value:
+hhd-z13 computes all three limits itself, from this machine's own firmware
+figures, and needs somewhere to write them.
+
+Those figures, read from
+`/sys/class/firmware-attributes/asus-armoury/attributes/`:
+
+| attribute | `default_value` | `max_value` |
+|---|---|---|
+| `ppt_pl1_spl` | 60 | 80 |
+| `ppt_pl2_sppt` | 75 | 92 |
+| `ppt_pl3_fppt` | 86 | 93 |
+
+The firmware's own shipped relationship between tiers is therefore
+**60 / 75 / 86 W** — PL2 at 1.25× the sustained limit, PL3 at 1.433×. *Auto*
+reproduces those proportions at whatever wattage a preset asks for, capped at
+92 / 93 W; *Manual* states all three outright; boost off means one flat limit.
+
+Upstream's own derivation is built around a **fixed 35 W ceiling**:
 
 ```python
 set_tdp("fast", FTDP_FN, min(max(steady, MAX_TDP_BOOST), int(steady * FPPT_BOOST)))
 ```
 
-`MAX_TDP_BOOST` is 35, an ROG Ally constant carrying upstream's own
-`# TODO: Make per device`. So at 35 W and above, `min(max(steady, 35), …)`
-collapses to `steady` and all three limits become the same number — the boost
-toggle does nothing. A preset set to Manual publishes all three on two config
-keys, and both being non-zero is what selects them. The stock Custom mode
-never writes those keys, so its behaviour is untouched.
+That ceiling is not a boost amount — it is the top of the boost range. This
+machine sustains up to 65 W, so from 35 W upward the ceiling sits *below the
+sustained value itself* and the expression collapses to `steady`: all three
+limits equal, boost flag inert, across most of the range this machine actually
+runs in.
+
+| PL1 | upstream | from this panel's figures |
+|---|---|---|
+| 9 W | 10 / 12 | 11 / 13 |
+| 20 W | 24 / 28 | 25 / 29 |
+| 45 W | 45 / 45 | 56 / 64 |
+| 65 W | 65 / 65 | 81 / 93 |
+
+A preset publishes its values on two config keys, and both being non-zero is
+what selects them. The stock Custom mode never writes them, so its behaviour
+is untouched.
 
 Ordering is enforced by the producer (`PL1 ≤ PL2 ≤ PL3`), because the firmware
 **rejects** a lower tier that exceeds a higher one rather than clamping it — a

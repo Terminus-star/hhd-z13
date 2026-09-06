@@ -564,12 +564,38 @@ ADJUSTOR_FUSE_PATCHES = (
 #   wattage survives, which is the behaviour stock Custom has always had.
 #
 # ENTRY 1 -- per-preset PL2/PL3.
-#   Upstream derives the short and fast limits from the sustained value via a
-#   MAX_TDP_BOOST constant chosen for the ROG Ally, which collapses all three
-#   to the same number at or above 35 W. A preset wanting explicit limits
-#   publishes them on two config keys; when both are non-zero they are written
-#   instead of the derived pair. Absent or zero, upstream behaviour is
-#   untouched -- including for the stock Custom mode, which never sets them.
+#   hhd-z13 computes all three power limits itself, from this machine's own
+#   firmware figures, and needs somewhere to write them.
+#
+#   Those figures, read from
+#   /sys/class/firmware-attributes/asus-armoury/attributes/:
+#
+#       attribute       default_value   max_value
+#       ppt_pl1_spl          60             80
+#       ppt_pl2_sppt         75             92
+#       ppt_pl3_fppt         86             93
+#
+#   So the firmware's own shipped relationship between the tiers is
+#   60 / 75 / 86 W -- PL2 at 1.25x the sustained limit, PL3 at 1.433x -- and
+#   hhd-z13 reproduces those proportions at whatever wattage a preset asks
+#   for, capped at 92 / 93 W.
+#
+#   Upstream's own derivation is built around a fixed 35 W ceiling. This
+#   machine sustains up to 65 W, so from 35 W upward that ceiling sits below
+#   the sustained value itself and
+#   min(max(steady, ceiling), steady * ratio) collapses to steady -- all three
+#   limits equal and the boost flag inert, across most of the range this
+#   machine actually runs in:
+#
+#       PL1        upstream       from this panel's figures
+#        9 W  ->   10 / 12         11 / 13
+#       20 W  ->   24 / 28         25 / 29
+#       45 W  ->   45 / 45         56 / 64
+#       65 W  ->   65 / 65         81 / 93
+#
+#   A preset publishes its three values on two config keys; both non-zero
+#   selects them. Absent or zero, upstream behaviour is untouched -- which is
+#   what the stock Custom mode always gets, since it never writes them.
 #
 # ENTRIES 2-3 -- an upstream bug, and a hard prerequisite for retiring
 # z13-hibernate's tdp-restore.sh.
@@ -595,12 +621,11 @@ ADJUSTOR_ASUS_PATCHES = (
         """\
                 self.queue_tdp = None
                 # {mark}: explicit PL2/PL3 when an hhd-z13 preset supplies
-                # them. Upstream's derived pair below uses MAX_TDP_BOOST = 35,
-                # an ROG Ally constant with upstream's own "TODO: Make per
-                # device", so min(max(steady, 35), steady * 1.4) collapses to
-                # steady for anything at or above 35 W -- the boost toggle
-                # does nothing there. These keys let a preset state the three
-                # limits outright.
+                # them. hhd-z13 computes all three from this machine's own
+                # firmware figures (60/75/86 W shipped, 92/93 W maxima) rather
+                # than from the derived pair below, whose fixed 35 W ceiling
+                # sits under this machine's sustained range and makes the
+                # boost flag inert from 35 W upward.
                 #
                 # Both must be non-zero to take effect, so the stock Custom
                 # mode -- which never writes them -- keeps upstream behaviour

@@ -42,11 +42,21 @@ WHY THE PRESET LIST CAN CHANGE AT RUNTIME
     a disagreement with what was last generated triggers exactly one rebuild.
 
 PL2/PL3
-    Upstream derives the short and fast limits from the sustained value using
-    MAX_TDP_BOOST = 35, an ROG Ally constant, so they collapse to the same
-    number at or above 35 W. A preset set to Manual publishes all three on two
-    config keys that the z13-tdp-presets patch reads. Both zero means derive,
-    which is what the stock Custom mode always gets.
+    All three limits are computed here, from this panel's own firmware
+    figures, and written through the z13-tdp-presets patch.
+
+    The firmware ships 60 / 75 / 86 W for PL1 / PL2 / PL3, so Auto reproduces
+    those proportions at whatever sustained value a preset asks for -- PL2 at
+    1.25x, PL3 at 1.433x -- capped at the firmware's own 92 / 93 W maxima.
+    Manual states all three outright. Boost off means one flat limit.
+
+    Deliberately not left to adjustor, whose derivation is built around a
+    fixed 35 W ceiling. This machine sustains up to 65 W, so from 35 W upward
+    that ceiling sits below the sustained value itself and its
+    min(max(steady, ceiling), steady * ratio) collapses to steady: all three
+    limits equal and the boost flag inert, across most of the range this
+    machine actually runs in. 45 W would come out 45/45/45 rather than
+    45/56/64.
 """
 
 import glob
@@ -76,6 +86,32 @@ STOCK_LABELS = {"quiet": "Silent", "balanced": "Performance", "performance": "Tu
 # it never writes custom.tdp back underneath us.
 MIN_TDP = 5
 MAX_TDP = 65
+
+# ── this panel's own power limits ─────────────────────────────────────────
+# Every number below is read off THIS machine, from
+# /sys/class/firmware-attributes/asus-armoury/attributes/:
+#
+#   attribute       default_value   max_value
+#   ppt_pl1_spl          60             80
+#   ppt_pl2_sppt         75             92
+#   ppt_pl3_fppt         86             93
+#
+# So the firmware's own shipped relationship between the three tiers is
+# 60 / 75 / 86 W, i.e. PL2 is 1.25x the sustained limit and PL3 is 1.433x.
+# Those ratios are what "Auto" reproduces at any sustained value, and the
+# max_value figures are the ceilings.
+#
+# Deriving them here rather than leaving it to adjustor is deliberate.
+# adjustor's derivation is built around a fixed 35 W ceiling that has nothing
+# to do with this hardware: this machine sustains up to 65 W, so from 35 W
+# upward that ceiling sits below the sustained value itself and its
+# min(max(steady, ceiling), steady * ratio) collapses to steady -- all three
+# limits equal, boost inert, at exactly the wattages this machine spends most
+# of its time in. Computing from the panel's own figures keeps the boost flag
+# meaningful across the whole 5-65 W range.
+FW_PL1, FW_PL2, FW_PL3 = 60, 75, 86
+SPPT_RATIO = FW_PL2 / FW_PL1        # 1.25
+FPPT_RATIO = FW_PL3 / FW_PL1        # 1.4333...
 MAX_SPPT = 92
 MAX_FPPT = 93
 
@@ -209,16 +245,24 @@ class Z13TdpPlugin(HHDPlugin):
         if conf.get(f"{base}.ppt.mode", "auto") == "manual":
             sppt = _clamp(conf[f"{base}.ppt.manual.sppt"].to(int), MIN_TDP, MAX_SPPT)
             fppt = _clamp(conf[f"{base}.ppt.manual.fppt"].to(int), MIN_TDP, MAX_FPPT)
-            # The firmware REJECTS a lower tier that exceeds a higher one
-            # rather than clamping it, so a nonsensical order would silently
-            # apply nothing. Raise rather than reject: the user asked for at
-            # least this much headroom.
-            sppt = max(sppt, watts)
-            fppt = max(fppt, sppt)
+        elif boost:
+            # Auto: this panel's own firmware ratios, applied at whatever
+            # sustained value the preset asks for. Unlike a fixed ceiling,
+            # this keeps the boost flag meaningful at every wattage the
+            # machine supports rather than only below some other device's
+            # maximum.
+            sppt = min(round(watts * SPPT_RATIO), MAX_SPPT)
+            fppt = min(round(watts * FPPT_RATIO), MAX_FPPT)
         else:
-            # 0/0 means "derive", which is upstream's behaviour and what the
-            # stock Custom mode always gets.
-            sppt = fppt = 0
+            # Boost off means exactly that: one flat limit, no headroom.
+            sppt = fppt = watts
+
+        # The firmware REJECTS a lower tier that exceeds a higher one rather
+        # than clamping it, so a nonsensical order would silently apply
+        # nothing at all. Raise rather than reject -- the request was for at
+        # least this much headroom.
+        sppt = max(sppt, watts)
+        fppt = max(fppt, sppt)
         return watts, boost, sppt, fppt
 
     def _apply(self, conf: Config, pid, watts, boost, sppt, fppt):
