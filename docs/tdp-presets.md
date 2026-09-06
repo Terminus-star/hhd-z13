@@ -1,57 +1,132 @@
-# Design sketch — multiple custom TDP presets
+# TDP presets
 
-Goal: named TDP presets beside the stock three, toggleable from the QAM, each
-appearing in KDE as the closest standard profile while its own power limits are
-what actually apply.
+What v0.4.0 built, and why it is shaped this way.
 
-Everything below is measured on this machine (GZ302EA, hhd 4.1.12) rather than
-assumed. The short version: **less of this needs building than it looks**, and
-the hard part is not the UI — it is making sure only one thing writes PPT.
+This document was rewritten after implementation. The design it originally
+described — a standalone `z13_tdp` selector, per-slot SPL/sPPT/fPPT triples, a
+`reports` field, and a patch to *stop* adjustor writing PPT — was built on two
+premises that turned out to be false. Both are recorded below, because the
+false version is the intuitive one and it will be reinvented otherwise.
 
 ---
 
-## 1. Constraints that decide the design
+## 1. What it does
 
-### KDE can only ever see three profiles, and that is fine
-
-`net.hadess.PowerProfiles` on the system bus is owned by **hhd itself** — a
-Python process under `hhd@termis.service`, which is adjustor's bundled PPD
-server. It advertises exactly:
+Four preset slots appear as extra entries in adjustor's **existing** TDP
+dropdown, beside Silent / Balanced / Performance / Custom:
 
 ```
-power-saver   balanced   performance
+TDP Mode  [ Custom · On Battery  ▾ ]
+            Silent
+            Balanced
+            Performance
+            Custom
+            Custom · Plugged In
+            Custom · On Battery      ← ours
+            Custom · Gaming
+            Custom · Alternate
+   TDP     [=====      ] 20 W
+   TDP Boost [x]
+
+Preset on Power Change  [ Enabled ▾ ]
+   On AC       [ Custom · Plugged In ▾ ]
+   On Battery  [ Custom · On Battery ▾ ]
 ```
 
-KDE's battery applet reads `ActiveProfile` from that name. power-profiles-daemon
-defines those three and no more, so publishing a fourth would misreport to every
-consumer that speaks the spec, KDE included.
+Each slot carries its own `tdp` (5–65 W) and `boost`. The power-change policy
+is **disabled by default** and **edge-triggered**: it acts on a plug/unplug
+transition and never continuously, so a mode picked by hand afterwards sticks
+until the next transition.
 
-So "show up as the closest preset" is not a compromise — it is the only correct
-behaviour. **Each preset carries which of the three it reports.** A 32 W preset
-can sit under `power-saver` in KDE while actually running 32 W.
+**hhd-z13 writes no PPT registers at all.** That is the design, not an
+omission — see §3.
 
-### hhd already has the preset mechanism
+---
 
-`/etc/hhd/profiles/` exists, is loaded at startup, and is writable from the QAM
-(`profiles[ev["name"]] = ev["config"]`). hhd's own settings documentation
-describes this exact use case:
+## 2. Two corrections that reshaped this
 
-> "you can have **TDP only profiles** that control the energy budget, and
-> controller profiles that switch controller behavior. Then, depending on the
-> game, you can apply the appropriate 2 profiles" — and "it is encouraged for
-> you to stack profiles together."
+### 2a. adjustor writes PPT only in `custom` mode
 
-The directory is currently **empty**. This is an unused feature, not a missing
-one.
+The original plan called "neuter `adjustor_asus`'s PPT writes" a *hard
+prerequisite*, believing adjustor rewrites `ppt_*` on every mode change, AC/DC
+event and wakeup.
 
-### The stock tree has exactly one custom slot
+It does not. Every PPT write in `adjustor/drivers/asus/__init__.py` lives
+inside `if mode == "custom":`. In quiet/balanced/performance it writes
+`throttle_thermal_policy` and nothing else. The AC/DC and wakeup handlers only
+set `self.queue_tdp`, which is drained exclusively inside that same branch.
 
-`tdp.asus.tdp_v2` has modes `[quiet, balanced, performance, custom]`, and
-`custom` holds a single scalar `tdp` plus `boost`. One slot, one number — which
-is why N presets need something on top, and why they want a PPT *triple* rather
-than one figure.
+So there was nothing to neuter. The problem was *reaching* adjustor's writer,
+not suppressing it — which inverted the whole release and deleted its riskiest
+item.
 
-### The TDP floor is 5 W, not 28 — and this decides which interface to write
+### 2b. TDP control was already enabled
+
+The claim "`tdp.tdp_enable` is `false`, so adjustor has written zero TDP
+values" came from conflating two keys with the same leaf name:
+
+- `tdp.tdp.tdp_enable` — an **action button**, rendered only while TDP is off.
+  False is its normal resting state when TDP is already on.
+- `hhd.settings.tdp_enable` — the real persisted bool. **Already true.**
+
+Read live over hhd's API, `tdp.asus` exists with all four stock modes and a
+`custom.tdp` slider of `min=5, max=65, default=45`. There is no enabling step.
+
+---
+
+## 3. Why adjustor does the writing
+
+adjustor already has a correct writer for this machine: the right floor (§4),
+the right interface (§5), the ordering, the debounce, the thermal-profile
+selection, and the KDE power-profile report derived from wattage. What it
+lacked was more than one custom slot.
+
+So hhd-z13 adds slots and nothing else:
+
+1. **Contribute modes.** hhd's `merge_reduce` unions a `mode`'s `modes` dict
+   exactly as it unions a container's `children`, so extra dropdown entries
+   are a merge, not a patch.
+2. **Patch adjustor to reach them** (§6).
+3. **Mirror** the selected slot's `tdp`/`boost` into
+   `tdp.asus.tdp_v2.custom.tdp` / `.custom.boost` — the two keys adjustor's
+   custom branch already reads.
+
+A second PPT writer inside hhd would have rebuilt, in-process, the exact
+multi-writer ambiguity this release exists to end.
+
+### The merge contract
+
+The contribution **omits `title`, `default` and `tags`.** `pick_tag` resolves
+as `b.get(tag, a.get(tag, default))` and plugins merge in ascending priority
+order, so adjustor (6) is `a` and hhd-z13 (11) is `b`. Supplying any of them
+would overwrite adjustor's "TDP Mode" title and its `default: balanced`.
+
+`type` is the one key that is **required**, at both levels. `merge_reduce`
+only unions when `b["type"] == a["type"]`; get it wrong and the contribution
+is silently dropped rather than raising.
+
+### Why the mirror runs in `prepare()`
+
+hhd runs `prepare()` for every plugin immediately before the update loop, in
+**descending** priority order (`run_plugin_cmd(..., reverse=True)`), while
+`update()` runs ascending. adjustor's driver is priority 6 and implements no
+`prepare()`, so priority 11 gets a clean write window in the *same tick*.
+
+From `update()` the write would land after adjustor had already read: one poll
+interval late (`POLL_DELAY` is 2 s), and on a mode switch adjustor would arm
+its debounce against the *previous* slot's wattage.
+
+### Why the mirror is change-gated
+
+adjustor writes `custom.tdp` back when its own clamp fires. Rewriting
+unconditionally would undo that every tick while it rewrote every tick — the
+CPU's power limits flapping. The mirror is gated on the tuple
+`(mode, watts, boost)`, and the slot sliders are declared over adjustor's
+*exact* enforced range (5–65 W) so its clamp never fires in the first place.
+
+---
+
+## 4. The floor is 5 W, not 28
 
 `asus-armoury` advertises calibration per attribute:
 
@@ -62,180 +137,152 @@ than one figure.
 | `ppt_pl3_fppt` | 86 | 45 | 93 | — |
 
 An earlier draft took that `min: 28` as the hardware floor and concluded a 9 W
-setting was invalid. **That was wrong.** 28 is what the *asus-armoury interface*
-advertises for itself, not what the hardware accepts. Six sources:
+setting was invalid. **That was wrong.** 28 is what the *asus-armoury
+interface* advertises for itself, not what the hardware accepts:
 
 | source | floor |
 |---|---|
 | `asus-armoury` `min_value` | **28** |
-| adjustor `Z1_DATA` — keyed on `"ROG Flow Z13 GZ302"`, this exact model | **5** |
-| adjustor's own TDP slider (`drivers/asus/settings.yml`) | **0** (max 30) |
+| adjustor `Z1_DATA`, keyed on `"ROG Flow Z13 GZ302"` — this exact model | **5** |
+| adjustor's own TDP slider | **0** |
 | `asus-nb-wmi` | no bounds files exist at all |
 | `z13ctl-plus` | documents only *upper* caps (75 W, 93 W with `--force`) |
 | measured on this machine | 9 W, 15 W, 20 W all worked |
 
-Only the armoury interface claims 28, and it is the outlier. `custom.tdp: 9` is
-a deliberate, mid-slider, working value.
-
-### Therefore: write `asus-nb-wmi`, not `asus-armoury`
-
-This reverses the earlier recommendation. `asus-nb-wmi` wins on every axis that
-matters here:
-
-- **No artificial floor.** Armoury's 28 W minimum would reject the 9/15/20 W
-  presets that are the entire point of this feature.
-- **More knobs.** nb-wmi exposes five (`ppt_pl1_spl`, `ppt_pl2_sppt`,
-  `ppt_fppt`, `ppt_apu_sppt`, `ppt_platform_sppt`); armoury exposes three.
-- **It is where everything else already writes.** Both `adjustor_asus` and
-  `z13ctl-plus` use it. Converging there means one interface, not a third one.
-- **It is not deprecated.** The kernel emits no deprecation warning for it;
-  `asus_wmi` and `asus-armoury` are both loaded and current. The "kernel-
-  deprecated" note in the older plan is unsubstantiated here.
-
-Armoury stays useful for one thing: its `max_value` figures are a reasonable
-*upper* calibration hint, and they corroborate z13ctl-plus's 93 W ceiling. Read
-maxima from armoury if you like; ignore its minima and floor at 5 W per
-`Z1_DATA`.
-
-### The blocking dependency: two interfaces, two answers
-
-The same three hardware limits, read through both interfaces, right now:
-
-| | SPL | sPPT | fPPT |
-|---|---|---|---|
-| `asus-nb-wmi` — where `adjustor_asus` writes | 45 | 45 | 45 |
-| `asus-armoury` — firmware-calibrated | 60 | 75 | 86 |
-
-`adjustor_asus` is loaded and writes `/sys/devices/platform/asus-nb-wmi/ppt_*`.
-It rewrites them on every mode change, AC/DC transition and wakeup. So does
-`z13ctl-plus`. That is three writers on one set of registers.
-
-The divergence above is not two interfaces contradicting each other about the
-same value — it is nb-wmi showing the last *override* written to it (45 across
-the board) while armoury reports the firmware profile's own numbers. Reading one
-after writing the other is how "the TDP reverted" gets misdiagnosed.
-
-**This must be resolved before presets are worth building.** The fix is the
-treatment already applied to the CPU controls: extend `z13-cpu-disable-native`
-in `hhd-patches/hhd-qam-toggle-patch.py` to neuter `adjustor_asus`'s PPT writes,
-and make z13ctl-plus's startup re-apply conditional, so hhd-z13 is the single
-writer — on `asus-nb-wmi`, per the section above.
-
-Corollary, and the rule that caught this: **read back through the interface you
-wrote.** Writing armoury and verifying via nb-wmi would have shown 45 and looked
-like a failure.
+Only armoury claims 28, and it is the outlier.
 
 ---
 
-## 2. Shape
+## 5. Write `asus-nb-wmi` — an explicit tradeoff, not a free win
 
-### Storage — our own config, not `/etc/hhd/profiles`
+adjustor writes `ppt_pl1_spl`, `ppt_pl2_sppt` and `ppt_fppt` under
+`/sys/devices/platform/asus-nb-wmi/`. That is the right choice here, but the
+earlier version of this document oversold it.
 
-Tempting to reuse hhd's profiles, but they are whole-config snapshots applied by
-name, which makes them awkward for a quick toggle and couples preset editing to
-hhd's profile UI. Presets live in our own settings tree instead, so they appear
-inline in the QAM next to the other Z13 controls, and hhd profiles remain
-available on top for anyone who wants to stack a preset with controller settings.
+**Correction: it IS deprecated.** The original text claimed "the kernel emits
+no deprecation warning for it." It does — lazily, on first access to the
+legacy path, which is why a boot-time scan misses it:
 
-### Settings tree
-
-Mirrors the Auto/Manual pattern already used for refresh rate and CPU boost, so
-the QAM stays consistent — the detail only appears once you choose to see it.
-
-```yaml
-z13_tdp:
-  type: mode
-  tags: [ordinal]
-  default: stock
-  modes:
-    stock:
-      title: Stock            # hands PPT back to the platform profile
-    preset:
-      title: Preset
-      children:
-        active:
-          type: discrete       # dropdown, populated from the presets below
-          tags: [dropdown]
-        # one block per preset slot; ranges filled from firmware at settings()
-        slot1:
-          type: mode
-          children:
-            name:   { type: display }
-            # floor 5 per Z1_DATA -- NOT armoury's min_value, which would
-            # reject the 9/15/20 W presets this feature exists for.
-            # maxima may be read from armoury's max_value as a hint.
-            spl:    { type: int, min: 5, max: 80 }
-            sppt:   { type: int, min: 5, max: 92 }
-            fppt:   { type: int, min: 5, max: 93 }
-            reports:                                   # what KDE is told
-              type: discrete
-              options: { "power-saver": Silent, "balanced": Balanced,
-                         "performance": Performance }
+```
+asus_wmi: Accessing attributes through /sys/bus/platform/asus_wmi is
+deprecated and will be removed in a future release.
+Please switch over to /sys/class/firmware_attributes.
 ```
 
-Two details worth fixing at design time, both already burned once:
+We write it anyway, with eyes open:
 
-- **Quote every option key.** YAML 1.1 turns bare `on`/`off`/`no` into booleans
-  and bare `60` into an int, so keys become `True`/`60` and stop matching.
-- **`settings()` runs once at startup.** Firmware ranges must be read there, and
-  adding a preset slot at runtime is not possible — so ship a fixed number of
-  slots (4 is plenty) rather than a growable list.
+- **Armoury's 28 W floor would reject the presets this feature exists for.**
+  That alone settles it: on the modern interface, a 9 W preset is unreachable.
+- **Armoury does not expose live state.** Its `current_value` reads back the
+  firmware profile's own numbers — 60/75/86 here — regardless of what override
+  is active. nb-wmi reads 45/45/45, the value actually in force.
+- **Armoury exposes three knobs; nb-wmi exposes five.**
+- **It is where everything else already writes**, so converging there means
+  one interface rather than a third.
 
-### `reports` default, not derived
+There is currently **no path that gives both** live state and a non-deprecated
+interface. When `firmware_attributes` grows a real minimum and reports live
+values, this decision should be revisited — that is the migration trigger.
 
-It is tempting to derive the KDE profile from SPL with thresholds. Don't — the
-whole point of a custom preset is that the user disagrees with the stock mapping.
-Default it from SPL (`<40 → power-saver`, `<60 → balanced`, else `performance`)
-and let it be overridden. Deriving it silently reintroduces the coupling that
-made panel overdrive worth decoupling from refresh rate.
+### The rule that follows
 
-### Apply path
+> **Read back through the interface you wrote.**
 
-On preset selection:
-
-1. Clamp to `5 .. max`. The floor is `Z1_DATA.min_tdp`, **not** armoury's
-   `min_value` — clamping to 28 would silently raise a 9 W preset to 28 W and
-   look like the TDP "reverting" all over again.
-2. Write `ppt_pl1_spl`, then `ppt_pl2_sppt`, then `ppt_fppt` under
-   `/sys/devices/platform/asus-nb-wmi/`. Ascending order, because the firmware
-   rejects a configuration where a lower tier exceeds a higher one.
-   `ppt_apu_sppt` and `ppt_platform_sppt` exist here too — z13ctl-plus sets both
-   to the PL2 value, which is a sane default to copy.
-3. Read all three **back through `asus-nb-wmi`** and log a warning on mismatch.
-   Verifying via armoury will show the firmware profile's numbers instead and
-   look like a failure that did not happen.
-4. Set PPD `ActiveProfile` to the preset's `reports` value so KDE follows.
-
-Re-apply on resume and on AC/DC transition — those are precisely the events
-where `adjustor_asus` used to clobber the values, and where the firmware itself
-may reset them.
+Verifying a nb-wmi write by reading armoury shows the firmware profile's
+numbers and looks like a failure that did not happen. This is the single most
+common misdiagnosis on this machine, and `system/v040-acceptance.sh` prints
+armoury's value side by side with nb-wmi's, explicitly labelled informational,
+so the divergence is visible rather than surprising.
 
 ---
 
-## 3. Sequencing
+## 6. The patch
 
-| | |
+`hhd-patches/hhd-qam-toggle-patch.py`, mark `z13-tdp-presets`. A **new** mark,
+not `z13-cpu-disable-native`: that one means "adjustor stops writing this
+because hhd-z13 owns it", and this is the exact opposite.
+
+Four `"replace"` entries, all anchors verified unique:
+
+| label | effect |
 |---|---|
-| **v0.2.0** (now) | **Nothing.** `custom.tdp: 9` is valid and deliberate; leave it. The earlier "raise it above the floor" item was based on the false 28 W floor and has been dropped. |
-| **prereq** | Extend `z13-cpu-disable-native` to `adjustor_asus`'s PPT writes. Nothing below is trustworthy until PPT has one writer. |
-| **v0.5.0** | The tree above: 4 slots, firmware-derived ranges, PPD mapping, resume/AC re-apply. |
-| **later** | Per-preset fan curve and CPU boost, if wanted. Deliberately out of scope at first — one new writer at a time. |
+| `preset-fallthrough` | `mode != "custom"` → `mode in ("quiet","balanced","performance")` |
+| `preset-apply` | `mode == "custom"` → also any mode outside those three |
+| `wakeup-clock` | `time.time()` → `time.perf_counter()` |
+| `acdc-clock` | `time.time()` → `time.perf_counter()` |
 
-The prerequisite is the real work; the UI is a settings tree and about 80 lines
-of apply logic. Note also `tdp.tdp_enable` is currently **`false`**, so hhd's
-TDP control is switched off entirely — that is why adjustor has written no TDP
-values at all, and it must be turned on before any of this does anything.
+Entry 1 is needed because adjustor's dispatch ends in `case _:` meaning
+*performance* — an unrecognised mode would set the Turbo thermal profile and
+write no power limit. Both preset entries are phrased as "not one of the three
+modes upstream handles", so adjustor never learns our mode names and behaviour
+is identical with no presets installed.
+
+### The clock bug (entries 3–4)
+
+Found while tracing the above, and a genuine upstream defect.
+`AsusDriverPlugin.update()` computes `curr = time.perf_counter()` and drains
+its debounce with `self.queue_tdp < curr`. But `notify()` arms it with
+`time.time()`. `perf_counter` is seconds since boot (~8×10³); `time()` is the
+Unix epoch (~1.79×10⁹). An epoch deadline is never less than `curr`, so:
+
+- **adjustor's resume and AC/DC re-applies have never fired.** The journal
+  shows `Power adapter status switched to 'ac', resetting TDP.` with no write
+  after it.
+- It compounds: `queue_tdp` then stays truthy forever, and the AC/DC arm is
+  guarded on `not self.queue_tdp`, so that stops arming too.
+
+This is load-bearing. `z13-hibernate`'s `tdp-restore.sh` exists *because*
+nothing re-applied TDP after resume; fixing the clock is what makes retiring
+it safe. It is also the strongest upstreaming candidate in this repo — two
+characters each, affecting every ASUS device adjustor supports, with a symptom
+users report as "TDP doesn't come back after sleep".
+
+**Known remaining wart:** with the clock fixed, a wakeup arms `queue_tdp` even
+in stock modes, where nothing drains it, blocking later AC/DC arms. Unchanged
+from today's behaviour for stock modes, fixed for custom and preset modes.
+Report it alongside rather than silently half-fixing it.
 
 ---
 
-## 4. Deliberately not doing
+## 7. Retirements
 
-- **A fourth D-Bus profile.** Breaks the PPD spec and every consumer of it.
-- **Deriving the KDE profile from SPL with no override.** Silent coupling.
-- **Reusing `/etc/hhd/profiles` as preset storage.** Whole-config snapshots,
-  wrong granularity for a toggle. Still useful for stacking on top.
-- **Writing `asus-armoury`.** Its `min_value` of 28 W would reject the low
-  presets this feature exists for, and it exposes three knobs where nb-wmi
-  exposes five. Its `max_value` figures are still worth reading as calibration.
-- **Clamping to armoury's advertised minimum.** That is the specific mistake
-  that produced the false "9 W is below the floor" conclusion.
+`system/v040-tdp.sh`, dry-run by default, `--revert`able.
+
+**z13ctl-plus.** Its resume path re-applies PPT and is *not* gated on its own
+`tdp_active` flag, so editing `state.json` cannot stop it. The working lever is
+the write grant: the daemon runs as the user and can only write those files
+because `z13ctl-plus-perms.service` chgrp/chmods them. hhd runs as root, so
+revoking the grant stops z13ctl-plus and leaves adjustor untouched. The other
+four grants in that unit are kept — `firmware.py` and the CPU plugin need them.
+
+**z13-hibernate.** `tdp-restore.sh` is scheduled from two different sleep
+hooks, so the script itself is replaced with a documented no-op rather than
+editing both hooks.
+
+**Do not retire either until the ordering gate passes:** suspend, resume, and
+confirm `Waking up from sleep…` is followed within ~10 s by
+`Setting tdp value 'steady'`. `z13-hibernate/common.sh:830` records a
+2026-08-26 measurement claiming hhd already re-asserts at T+4, which
+contradicts the clock analysis. One of the two is stale and only the machine
+can settle it. If the gate fails, keep the old restore path — the presets work
+either way.
+
+---
+
+## 8. Deliberately not done
+
+- **A fourth D-Bus power profile.** hhd owns `net.hadess.PowerProfiles` and
+  the spec has exactly three. Each preset maps to the closest, derived by
+  adjustor from wattage (`<42` power-saver, `<50` balanced, else performance).
+  Deriving is what was asked for: "show up on KDE as the closest preset".
+- **Per-slot sPPT/fPPT.** adjustor derives them from the sustained value and
+  the boost flag. Exposing them would mean bypassing its writer.
+- **Live wattage in the mode titles.** Titles are static YAML, so
+  "Quiet 15 W" becomes a lie the moment that slot is edited. Role names stay
+  true. Rendering live values needs a settings regeneration per slider drag —
+  a new failure class for a cosmetic win.
+- **Reaching `max_tdp_oc` (90 W).** Slots stay 5–65 to match adjustor's
+  enforced range exactly. 90 W remains available through stock Custom with
+  *Enforce Device TDP Limits* off.
+- **`/etc/hhd/profiles/` as storage.** Whole-config snapshots; wrong
+  granularity. It stays available for stacking.
