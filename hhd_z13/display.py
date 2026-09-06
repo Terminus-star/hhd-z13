@@ -564,6 +564,11 @@ class Z13DisplayPlugin(HHDPlugin):
         self.old_status = None
         self.old_backend = None
         self.old_vrr = None
+        # Last string written to the Auto indicator. Only there to avoid
+        # rewriting an unchanged value -- every config write wakes hhd's
+        # long-poll and redraws the UI, so a field refreshed on a timer would
+        # otherwise repaint the QAM every interval for no reason.
+        self.old_shown_rate = None
 
         self._last_reconcile = 0.0
 
@@ -616,6 +621,7 @@ class Z13DisplayPlugin(HHDPlugin):
             # read while a different (or no) session was active.
             self.old_rate = None
             self.old_vrr = None
+            self.old_shown_rate = None
 
         if not available:
             return
@@ -679,6 +685,30 @@ class Z13DisplayPlugin(HHDPlugin):
         # rate every 15s would mean fighting KDE's own display settings for
         # anyone who deliberately changed the rate mid-session. Auto stays
         # quiet until the charger actually moves.
+        if rate_mode != "manual":
+            # Auto: report what the panel is ACTUALLY doing. Auto writes the
+            # rate once when the charger moves and then deliberately stays
+            # quiet (see the reconcile note below), so without this the
+            # control asserts "180 Hz on AC" and never confirms it -- and a
+            # switch that silently failed, or a rate someone changed in KDE,
+            # would look identical to one that worked.
+            #
+            # Read-only: it never writes the panel or the rate setting, so it
+            # cannot fight KDE the way a reconcile would. Only the display
+            # field moves.
+            #
+            # Gated on the mode rather than merely hidden by it, so selecting
+            # Manual actually stops the kscreen-doctor calls. Sharing the
+            # RECONCILE_INTERVAL_S clock keeps it to one spawn per interval.
+            live = read_rate(session, backend, display)
+            shown = f"{live} Hz" if live else "unavailable"
+            if shown != self.old_shown_rate:
+                self.old_shown_rate = shown
+                conf[
+                    "gamemode.display.status.available.refresh_rate.auto.current"
+                ] = shown
+            return
+
         if rate_mode == "manual":
             live = read_rate(session, backend, display)
             # Compare against the Hz the SELECTION implies, not the selection
