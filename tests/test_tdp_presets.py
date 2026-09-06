@@ -264,6 +264,7 @@ ok(len(json.load(open(t.STORE_PATH))["presets"]) == 1,
    "the last preset cannot be removed")
 
 # Toggling boost rebuilds the tree once, so Power Limits appears or goes.
+t._adjustor_is_patched = lambda: True
 p = plugin(boost=True)
 c = mkconf(boost=False)
 p.update(c)
@@ -272,6 +273,42 @@ ok(n == 1, f"toggling boost rebuilds the tree ({n})")
 p.update(c)
 ok(len([e for e in p.events if e.get("type") == "settings"]) == 1,
    "and only once, not on every tick")
+
+# THE SAFETY PROPERTY. A settings rebuild is fatal to an UNPATCHED adjustor:
+# hhd.settings.tdp_ready has no default, so a rebuild resets it to None, and
+# adjustor only ever sets it once -- behind a self.init that latches on first
+# initialisation. Its asus/battery/init plugins all gate settings() on that
+# flag, so the entire TDP section disappears from the QAM until hhd restarts.
+# Observed exactly that. A control of ours appearing is never worth the user's
+# TDP controls vanishing.
+t._adjustor_is_patched = lambda: False
+p = plugin(boost=True)
+c = mkconf(boost=False)
+p.update(c)
+ok(not [e for e in p.events if e.get("type") == "settings"],
+   "no rebuild while adjustor is unpatched — it would lose its TDP section")
+ok(c[t.STATUS].to(str) == t.PATCH_WARNING, "and the QAM says why")
+
+# Add still records the change; it just cannot refresh the list until restart.
+fresh_store([{"tdp": 9, "boost": True, "ppt": "auto", "sppt": 0, "fppt": 0}])
+p = plugin()
+c = mkconf()
+c[t.ADD] = True
+p.update(c)
+ok(len(json.load(open(t.STORE_PATH))["presets"]) == 2,
+   "Add is still saved while unpatched")
+ok(not [e for e in p.events if e.get("type") == "settings"],
+   "but still no rebuild")
+
+# Unanswerable must not block: only a KNOWN-unpatched adjustor is unsafe.
+t._adjustor_is_patched = lambda: None
+p = plugin(boost=True)
+c = mkconf(boost=False)
+p.update(c)
+ok(len([e for e in p.events if e.get("type") == "settings"]) == 1,
+   "an unanswerable patch check does not block the rebuild")
+
+t._adjustor_is_patched = lambda: True
 
 
 # ==========================================================================
