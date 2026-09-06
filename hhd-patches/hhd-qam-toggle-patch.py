@@ -670,6 +670,35 @@ ADJUSTOR_ASUS_PATCHES = (
         "replace",
     ),
     (
+        "ppd-echo",
+        '            elif ev["type"] == "ppd":\n                match ev["status"]:\n',
+        """\
+            elif ev["type"] == "ppd":
+                # {mark}: ignore an echo of our own report.
+                #
+                # self.pp holds the profile this driver last emitted, in the
+                # same vocabulary the event carries. An event that matches it
+                # carries no new information -- it is the desktop agreeing
+                # with what we already told it.
+                #
+                # Acting on it anyway force-writes tdp_v2.mode to a stock
+                # profile, which is why the TDP Mode selector kept reverting
+                # to Silent/Performance a second or two after a preset was
+                # applied. The wattage survived, because the stock branches
+                # write only a fan curve, but the label flapped and any later
+                # apply came from the wrong branch.
+                #
+                # A genuine desktop-initiated change still differs from
+                # self.pp and is still honoured, so clicking a profile in KDE
+                # works exactly as before.
+                if ev["status"] == self.pp:
+                    continue
+                match ev["status"]:
+""",
+        'if ev["status"] == self.pp:',
+        "replace",
+    ),
+    (
         "wakeup-clock",
         "                self.queue_tdp = time.time() + SLEEP_DELAY\n",
         """\
