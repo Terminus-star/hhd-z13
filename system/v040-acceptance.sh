@@ -146,7 +146,11 @@ print("BOOST " + str(stval("tdp.asus.tdp_v2.custom.boost")))
 # auto/manual dropdown, and not present at all when boost is off.
 print("PPTCTL " + str("z13_sppt" in cust and "z13_fppt" in cust))
 print("PPTDROP " + str("z13_ppt" in cust))
-print("APPLIEDTYPE " + str(cust.get("z13_applied", {}).get("type")))
+# Telemetry is a SIBLING of the TDP Mode selector, so it still reports while
+# a preset or a stock profile is active -- exactly when Custom's sliders are
+# not on screen to read the answer off.
+print("APPLIEDTYPE " + str(asus.get("z13_applied", {}).get("type")))
+print("APPLIEDNEST " + str("z13_applied" in cust))
 
 slots = sorted(cust.get("z13_preset", {}).get("modes", {}))
 print("SLOTS " + ",".join(slots))
@@ -173,7 +177,7 @@ if mode == "custom":
         print("NSTORED " + str(len(st_j.get("presets") or [])))
     except Exception as e:
         print("TARGETS unreadable " + str(e))
-print("APPLIED " + str(stval("tdp.asus.tdp_v2.custom.z13_applied") or ""))
+print("APPLIED " + str(stval("tdp.asus.z13_applied") or ""))
 print("STATUS " + str(stval("tdp.asus.tdp_v2.custom.z13_status") or ""))
 PY
 )
@@ -233,6 +237,9 @@ else
   [ "$(echo "$EVAL" | sed -n 's/^APPLIEDTYPE //p')" = "display" ] \
     && p "Applied is read-only telemetry" "display" \
     || f "Applied is read-only telemetry" "$(echo "$EVAL" | sed -n 's/^APPLIEDTYPE //p')"
+  [ "$(echo "$EVAL" | sed -n 's/^APPLIEDNEST //p')" = "False" ] \
+    && p "telemetry always visible" "sibling of the TDP Mode selector" \
+    || f "telemetry always visible" "still nested inside Custom"
 
   SLOTS=$(echo "$EVAL" | sed -n 's/^NPRESET //p')
   NSTORED=$(echo "$EVAL" | sed -n 's/^NSTORED //p')

@@ -91,7 +91,10 @@ CUSTOM_TDP = f"{CUSTOM}.tdp"          # adjustor's slider
 CUSTOM_BOOST = f"{CUSTOM}.boost"      # adjustor's toggle, and the PL2/PL3 gate
 SPPT = f"{CUSTOM}.z13_sppt"
 FPPT = f"{CUSTOM}.z13_fppt"
-APPLIED = f"{CUSTOM}.z13_applied"
+# A sibling of the TDP Mode selector, not a child of Custom: the reading
+# matters most while a preset or a stock profile is active, which is exactly
+# when Custom's own sliders are not on screen to read it off.
+APPLIED = f"{BASE}.z13_applied"
 ADD = f"{CUSTOM}.z13_add"
 STATUS = f"{CUSTOM}.z13_status"
 POWER = f"{BASE}.z13_power"
@@ -258,7 +261,11 @@ class Z13TdpPlugin(HHDPlugin):
                     # union and the contribution is silently dropped. Titles
                     # omitted so adjustor's own survive pick_tag.
                     "type": "container",
-                    "children": {"tdp_v2": tdp_v2, "z13_power": power},
+                    "children": {
+                        "tdp_v2": tdp_v2,
+                        "z13_applied": sets["z13_applied"],
+                        "z13_power": power,
+                    },
                 }
             }
         }
