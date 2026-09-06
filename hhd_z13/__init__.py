@@ -31,6 +31,14 @@ def _is_z13() -> bool:
     Fails CLOSED: if the DMI node cannot be read the plugins do not load,
     because "unknown hardware" is exactly the case that must not be assumed
     to be a Z13.
+
+    That try/except is the one deliberate deviation from upstream's shape.
+    hhd/device/rog_ally/__init__.py does the same substring match on the same
+    file but opens it bare, so a missing or unreadable DMI node raises out of
+    autodetect() instead of simply declining to load. Everything else here --
+    the `if len(existing): return existing` guard, the substring rather than
+    exact match, returning a plugin list on match and [] otherwise -- follows
+    that module exactly.
     """
     try:
         with open(DMI_PATH) as f:

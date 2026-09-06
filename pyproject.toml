@@ -9,7 +9,14 @@ description = "CPU EPP/boost/perf-mode and display refresh-rate control for the 
 requires-python = ">=3.10"
 
 [project.entry-points."hhd.plugins"]
-z13_cpu = "hhd_z13:autodetect"
+# Named for the DEVICE, not one of the plugins it provides, matching every
+# per-hardware module upstream: rog_ally, legion_go, msi_claw, gpd_win,
+# ayaneo, orange_pi, onexplayer. The old name "z13_cpu" was one of the two
+# plugins inside, so hhd logged the contradictory
+#     -  z13_cpu: z13_cpu, z13_display
+# where upstream reads
+#     - rog_ally: rog_ally
+rog_flow_z13 = "hhd_z13:autodetect"
 
 [tool.setuptools]
 packages = ["hhd_z13"]
