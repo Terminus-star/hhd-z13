@@ -74,6 +74,12 @@ MARK_VT = "z13-vt-gate"
 MARK_ONESHOT = "z13-oneshot"
 MARK_CPU = "z13-cpu-disable-native"
 MARK_AC = "z13-ac-backport"
+# Deliberately NOT folded into MARK_CPU. That mark means "adjustor stops
+# writing this hardware because hhd-z13 owns it now"; this one is the exact
+# opposite -- adjustor keeps every PPT write and is handed MORE work, because
+# v0.4.0 hands TDP ownership back to it rather than growing a second writer.
+# Sharing the mark would make the patcher's own --check labels lie.
+MARK_TDP = "z13-tdp-presets"
 
 
 def find_overlay_dir():
@@ -102,6 +108,21 @@ def find_adjustor_fuse():
     hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/fuse/gpu.py"))
     if not hits:
         sys.exit("ERROR: adjustor/fuse/gpu.py not found (is adjustor installed?)")
+    return hits[-1]
+
+
+def find_adjustor_asus():
+    """adjustor's ASUS TDP driver -- the only PPT writer we keep. Full path.
+
+    Same package and the same pacman target as the gpu/fuse files above:
+    adjustor ships inside the `hhd` package, which 99-z13-hhd-qam-toggle.hook
+    already lists, so this file is re-patched on an hhd upgrade for free.
+    """
+    hits = sorted(
+        glob.glob("/usr/lib/python3*/site-packages/adjustor/drivers/asus/__init__.py")
+    )
+    if not hits:
+        sys.exit("ERROR: adjustor asus driver not found (is adjustor installed?)")
     return hits[-1]
 
 
@@ -525,6 +546,111 @@ ADJUSTOR_FUSE_PATCHES = (
 )
 
 
+# hhd-z13's TDP presets, and an upstream clock bug they depend on.
+#
+# ENTRIES 1-2 -- make preset modes reachable.
+#   hhd_z13/tdp.py contributes extra modes into adjustor's OWN tdp_v2 dropdown
+#   (hhd's merge_reduce unions a mode's `modes` dict exactly as it unions a
+#   container's `children`). It writes no PPT itself. Instead it mirrors the
+#   selected preset's watts into tdp.asus.tdp_v2.custom.tdp from prepare(),
+#   which hhd runs BEFORE this file's update() in the same tick -- __main__.py
+#   calls run_plugin_cmd(..., reverse=True) for prepare, i.e. descending
+#   priority, and adjustor implements no prepare() at all.
+#
+#   Two things stand in the way, both here. Upstream gates every PPT write on
+#   `mode == "custom"`, and its preset dispatch ends in `case _:` meaning
+#   "performance" -- so an unrecognised mode would set the Turbo thermal
+#   profile and write no PPT whatsoever. Both entries are written as "not one
+#   of the three modes upstream actually handles", so this file never has to
+#   know hhd-z13's mode names and behaviour is identical with no presets
+#   installed.
+#
+# ENTRIES 3-4 -- an upstream bug, and a hard prerequisite for retiring
+# z13-hibernate's tdp-restore.sh.
+#   update() computes `curr = time.perf_counter()` and drains the debounce
+#   with `self.queue_tdp < curr`, but notify() arms it with `time.time()`.
+#   perf_counter is seconds since boot (~8e3 here); time() is the Unix epoch
+#   (~1.79e9). An epoch deadline is never less than curr, so the resume and
+#   AC/DC re-applies have NEVER fired -- they log their intent and stop.
+#   Verified in the journal: "Power adapter status switched to 'ac',
+#   resetting TDP." with no write after it.
+#
+#   It compounds: queue_tdp then stays truthy forever, and the AC/DC arm is
+#   guarded on `not self.queue_tdp`, so that stops arming too until some
+#   user-driven change in update() overwrites it with a perf_counter value.
+#
+#   This is the strongest upstreaming candidate found so far -- two characters
+#   each, affecting every ASUS device adjustor supports, with a symptom users
+#   report as "TDP doesn't come back after sleep".
+ADJUSTOR_ASUS_PATCHES = (
+    (
+        "preset-fallthrough",
+        '        if tdp_reset and mode != "custom":\n',
+        """\
+        # {mark}: name the three modes upstream actually handles, instead of
+        # "anything that is not custom". The match below ends in `case _:`
+        # meaning performance, so hhd-z13's preset modes would otherwise set
+        # the Turbo thermal profile here and then write no PPT at all.
+        #
+        # Identical behaviour with no presets installed: tdp_reset is only
+        # ever True when mode is not None (both guards above test it), and the
+        # only non-None values upstream itself produces are these three and
+        # "custom".
+        if tdp_reset and mode in ("quiet", "balanced", "performance"):
+""",
+        'if tdp_reset and mode in ("quiet", "balanced", "performance"):',
+        "replace",
+    ),
+    (
+        "preset-apply",
+        '        if mode == "custom":\n',
+        """\
+        # {mark}: run the whole custom apply path for hhd-z13's preset modes
+        # too. Everything inside reads tdp.asus.tdp_v2.custom.tdp and
+        # .custom.boost, and hhd-z13 mirrors the ACTIVE preset's own slider
+        # into exactly those two keys from prepare(), which runs before this
+        # update() in the same tick. So the clamping, the debounce, the
+        # thermal-profile selection, the PPD "energy" report and the
+        # resume/AC re-apply all work unchanged, with no second PPT writer
+        # anywhere in the system.
+        #
+        # mode is None-guarded because upstream skipped this branch for None
+        # and there is no reason to start writing PPT for it.
+        if mode == "custom" or (mode and mode not in ("quiet", "balanced", "performance")):
+""",
+        'if mode == "custom" or (mode and mode not in',
+        "replace",
+    ),
+    (
+        "wakeup-clock",
+        "                self.queue_tdp = time.time() + SLEEP_DELAY\n",
+        """\
+                # {mark}: perf_counter, not time(). update() drains this queue
+                # with `self.queue_tdp < curr` where curr is
+                # time.perf_counter() -- seconds since boot. time.time() is
+                # the Unix epoch, so the deadline was never less than curr and
+                # this re-apply has never fired.
+                self.queue_tdp = time.perf_counter() + SLEEP_DELAY
+""",
+        "self.queue_tdp = time.perf_counter() + SLEEP_DELAY",
+        "replace",
+    ),
+    (
+        "acdc-clock",
+        "                self.queue_tdp = time.time() + APPLY_DELAY\n",
+        """\
+                # {mark}: perf_counter, not time() -- same bug as the wakeup
+                # arm above, same fix. This one also self-blocked: the guard
+                # on this branch is `not self.queue_tdp`, and a never-draining
+                # epoch deadline left it permanently truthy.
+                self.queue_tdp = time.perf_counter() + APPLY_DELAY
+""",
+        "self.queue_tdp = time.perf_counter() + APPLY_DELAY",
+        "replace",
+    ),
+)
+
+
 # Backport of hhd's own AC-status fix, so this machine gets it on 4.1.12.
 #
 # 4.1.12 resolves the AC ADAPTER's `online` file (contents "0"/"1") but then
@@ -663,7 +789,10 @@ def main():
     a_gpu = find_adjustor_gpu()
     a_fuse = find_adjustor_fuse()
     a_utils = find_hhd_utils()
-    adj = (a_gpu, a_fuse, a_utils)
+    a_asus = find_adjustor_asus()
+    # Membership here is what gives a file backup(), revert() and the
+    # pycache purge for free -- all three already iterate this tuple.
+    adj = (a_gpu, a_fuse, a_utils, a_asus)
     mode = sys.argv[1] if len(sys.argv) > 1 else "--apply"
 
     if mode == "--check":
@@ -684,6 +813,9 @@ def main():
         ):
             print(f"  {disp:14s} {'cpu-native':12s} {marked_state(path, table)}")
         print(f"  {'hhd/utils.py':14s} {'ac-backport':12s} {marked_state(a_utils, UTILS_PATCHES)}")
+        # Deliberately not folded into the loop above: that loop hardcodes
+        # the label 'cpu-native', and this table is a different mark.
+        print(f"  {'adjustor/asus':14s} {'tdp-presets':12s} {marked_state(a_asus, ADJUSTOR_ASUS_PATCHES)}")
         return
 
     if mode == "--revert":
@@ -707,6 +839,7 @@ def main():
         ("adjustor/gpu", lambda p: apply_marked(p, ADJUSTOR_GPU_PATCHES), a_gpu),
         ("adjustor/fuse", lambda p: apply_marked(p, ADJUSTOR_FUSE_PATCHES), a_fuse),
         ("hhd/utils.py", lambda p: apply_marked(p, UTILS_PATCHES, MARK_AC), a_utils),
+        ("adjustor/asus", lambda p: apply_marked(p, ADJUSTOR_ASUS_PATCHES, MARK_TDP), a_asus),
     ):
         ok, msg = fn(arg)
         results.append((name, ok, msg))

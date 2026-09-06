@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hhd-z13"
-version = "0.1.0"
+version = "0.3.0"
 description = "CPU EPP/boost/perf-mode and display refresh-rate control for the ASUS ROG Flow Z13, via z13ctl-plus and kscreen-doctor"
 requires-python = ">=3.10"
 
@@ -22,4 +22,4 @@ rog_flow_z13 = "hhd_z13:autodetect"
 packages = ["hhd_z13"]
 
 [tool.setuptools.package-data]
-hhd_z13 = ["settings.yml", "display_settings.yml", "firmware_settings.yml"]
+hhd_z13 = ["settings.yml", "display_settings.yml", "firmware_settings.yml", "tdp_settings.yml"]
