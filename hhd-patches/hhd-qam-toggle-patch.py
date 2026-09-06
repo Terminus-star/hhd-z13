@@ -777,17 +777,37 @@ ADJUSTOR_ASUS_PATCHES = (
         "replace",
     ),
     (
-        "wakeup-clock",
+        "wakeup-reapply",
         "                self.queue_tdp = time.time() + SLEEP_DELAY\n",
         """\
-                # {mark}: perf_counter, not time(). update() drains this queue
-                # with `self.queue_tdp < curr` where curr is
-                # time.perf_counter() -- seconds since boot. time.time() is
-                # the Unix epoch, so the deadline was never less than curr and
-                # this re-apply has never fired.
+                # {mark}: two fixes, both needed for a resume to restore TDP.
+                #
+                # 1. perf_counter, not time(). update() drains this queue with
+                #    `self.queue_tdp < curr` where curr is
+                #    time.perf_counter() -- seconds since boot. time.time() is
+                #    the Unix epoch, so the deadline was never less than curr
+                #    and this re-apply had never once fired.
+                #
+                # 2. self.startup, so the re-apply reaches EVERY mode. The
+                #    queue above is only ever drained inside the custom apply
+                #    branch, so on a stock profile it is set and never read:
+                #    no limits are restored, and because the ac/dc arm below
+                #    is guarded on `not self.queue_tdp`, a permanently truthy
+                #    queue then blocks power-source switching too.
+                #
+                #    startup is the flag that already means "re-assert the
+                #    active mode from scratch" -- it makes tdp_reset true
+                #    further down, which reaches the stock branch as well as
+                #    the custom one -- and update() clears it at the end, so
+                #    this is a one-shot rather than a latch.
+                #
+                #    Matters most after hibernate, where the SoC loses power
+                #    and the limits come back at the firmware defaults while
+                #    the selector still names a profile.
                 self.queue_tdp = time.perf_counter() + SLEEP_DELAY
+                self.startup = True  # re-apply on resume, whatever the mode
 """,
-        "self.queue_tdp = time.perf_counter() + SLEEP_DELAY",
+        "self.startup = True  # re-apply on resume",
         "replace",
     ),
     (
