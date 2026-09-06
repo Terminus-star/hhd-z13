@@ -51,6 +51,23 @@ z13_display:
                 auto:
                   type: container
                   title: Auto (180 Hz on AC, 60 Hz on battery)
+                  children:
+                    # Lives inside the "auto" mode container, so hhd renders it
+                    # only while Auto is selected -- a mode shows the children
+                    # of the chosen mode and nothing else. That is also what
+                    # gates the polling: update() reads the panel for this only
+                    # when rate_mode is auto, so choosing Manual stops the
+                    # kscreen-doctor calls rather than merely hiding the text.
+                    current:
+                      type: display
+                      title: Current
+                      tags: [ non-essential ]
+                      hint: >-
+                        What the panel is actually running at, read back from
+                        the compositor rather than inferred from the power
+                        source. Auto writes the rate on an AC/battery change
+                        and then leaves the panel alone, so this is the only
+                        confirmation that the switch really landed.
                 manual:
                   type: container
                   title: Manual
@@ -65,9 +82,21 @@ z13_display:
                         # which breaks the string comparisons in display.py.
                         "60": 60Hz
                         "180": 180Hz
+                        # A tier ABOVE 180, not a separate axis: 180 Hz with panel
+                        # overdrive on. Modelled this way because overdrive's value
+                        # scales with refresh -- at 60 Hz a frame lasts 16.7 ms and
+                        # most pixel transitions finish unaided, while at 180 Hz they
+                        # have 5.6 ms and cannot. Making it a rung on the same ladder
+                        # also makes the bad combination unreachable: overdrive's
+                        # overshoot is tuned for the short frame, so holding it for a
+                        # 60 Hz frame is where inverse ghosting becomes visible.
+                        "overdrive": 180Hz + Overdrive
                       hint: >-
                         A fixed rate, ignoring the power source. Only shown while the mode
-                        above is Manual.
+                        above is Manual. "180 Hz + Overdrive" runs 180 Hz and turns on
+                        panel overdrive, which speeds up pixel transitions to cut motion
+                        blur; the trade is possible overshoot ("inverse ghosting") on
+                        high-contrast edges. Selecting 60 or 180 turns it back off.
             vrr:
               type: multiple
               title: Adaptive Sync

@@ -118,9 +118,35 @@ _kscreen_cache = {"t": 0.0, "data": None}
 TOP_RATE = "180"
 # What "auto" drops to off mains -- the rate z13ctl-plus's battery preset used.
 BATTERY_RATE = "60"
-# The rates the control offers explicitly. Anything else in the setting (i.e.
-# "auto") is a policy, not a rate, and has to be resolved before it is used.
-RATES = (BATTERY_RATE, TOP_RATE)
+# A tier ABOVE TOP_RATE rather than an independent toggle: the same 180 Hz,
+# with panel overdrive on. Overdrive's usefulness scales with refresh -- at
+# 60 Hz a frame lasts 16.7 ms and most pixel transitions finish unaided, at
+# 180 Hz they get 5.6 ms and cannot -- so it belongs on the same ladder. It
+# also makes the bad combination unreachable: the overshoot is tuned for the
+# short frame, and holding it across a 60 Hz frame is where inverse ghosting
+# shows up.
+OVERDRIVE_RATE = "overdrive"
+# The selections the control offers explicitly. Anything else in the setting
+# (i.e. "auto") is a policy, not a selection, and is resolved before use.
+RATES = (BATTERY_RATE, TOP_RATE, OVERDRIVE_RATE)
+
+# What Auto is allowed to choose. Deliberately EXCLUDES OVERDRIVE_RATE.
+# Overdrive changes image quality -- it trades motion blur for possible
+# overshoot on high-contrast edges -- and that is a judgement only the user
+# should make. Auto reacting to a charger must never alter how the panel
+# renders, only how fast it refreshes, so plugging in can never silently
+# introduce ghosting. Overdrive is reachable from the Manual selector alone.
+AUTO_RATES = (BATTERY_RATE, TOP_RATE)
+
+
+def _rate_hz(sel):
+    """The actual refresh rate a selection asks for.
+
+    OVERDRIVE_RATE is not a rate the panel understands -- it is TOP_RATE plus
+    a firmware flag -- so everything that talks to kscreen or the framerate
+    bridge has to go through this rather than using the raw selection.
+    """
+    return TOP_RATE if sel == OVERDRIVE_RATE else sel
 
 # kscreen-doctor accepts `output.<name>.vrrpolicy.<never|automatic|always>`.
 # It is absent from --help but works; confirmed by setting each in turn and
@@ -322,6 +348,32 @@ def bridge_fps_limit(session, rate):
     return gamescope.set_fps_limit(session, display, limit)
 
 
+def _apply_overdrive(on: bool) -> None:
+    """Set the panel overdrive firmware flag, best effort.
+
+    Reuses firmware.py's reader/writer rather than opening the attribute here
+    -- that module already validates against possible_values and reads back
+    after writing, because asus-armoury reports a firmware rejection
+    inconsistently.
+
+    Never raises and never blocks the rate change. Overdrive is an image
+    quality refinement; if the attribute is missing on some firmware the rate
+    itself must still apply, so a failure is logged and stepped over rather
+    than aborting the switch.
+    """
+    from .firmware import _read as _fw_read, _supported as _fw_supported
+    from .firmware import _write as _fw_write
+
+    try:
+        if not _fw_supported("panel_overdrive"):
+            return
+        if _fw_read("panel_overdrive") is on:
+            return
+        _fw_write("panel_overdrive", on)
+    except Exception:
+        pass
+
+
 def _resolve_rate(mode, manual, backend):
     """Map the Auto/Manual gate onto an actual refresh rate.
 
@@ -335,7 +387,11 @@ def _resolve_rate(mode, manual, backend):
     ac = _on_ac()
     if ac is None:
         return None
-    return TOP_RATE if ac else BATTERY_RATE
+    # From AUTO_RATES, never RATES: auto must not be able to reach the
+    # overdrive tier. Indexing the tuple rather than naming the constants
+    # keeps that guarantee in one place -- if OVERDRIVE_RATE were ever added
+    # to AUTO_RATES the mistake would be visible there, not buried here.
+    return AUTO_RATES[1] if ac else AUTO_RATES[0]
 
 def _run_as_user(session, args, timeout=KSCREEN_TIMEOUT_S):
     """subprocess.run dropped to the desktop session's uid/gid, mirroring
@@ -508,6 +564,11 @@ class Z13DisplayPlugin(HHDPlugin):
         self.old_status = None
         self.old_backend = None
         self.old_vrr = None
+        # Last string written to the Auto indicator. Only there to avoid
+        # rewriting an unchanged value -- every config write wakes hhd's
+        # long-poll and redraws the UI, so a field refreshed on a timer would
+        # otherwise repaint the QAM every interval for no reason.
+        self.old_shown_rate = None
 
         self._last_reconcile = 0.0
 
@@ -560,6 +621,7 @@ class Z13DisplayPlugin(HHDPlugin):
             # read while a different (or no) session was active.
             self.old_rate = None
             self.old_vrr = None
+            self.old_shown_rate = None
 
         if not available:
             return
@@ -594,14 +656,21 @@ class Z13DisplayPlugin(HHDPlugin):
 
         if new_rate is not None and new_rate != self.old_rate:
             self.old_rate = new_rate
-            set_rate(session, new_rate, backend, display)
+            # Overdrive is set on EVERY rate application, not only when
+            # entering the overdrive tier -- so leaving it turns the panel
+            # flag back off. Skipping the off-write would leave overdrive
+            # latched at 60 Hz, which is exactly the combination this tier
+            # exists to make unreachable, and the same shape as the frequency
+            # clamp that used to survive a switch back to Auto.
+            _apply_overdrive(new_rate == OVERDRIVE_RATE)
+            set_rate(session, _rate_hz(new_rate), backend, display)
             # A nested gamescope cannot follow the panel; bring its framerate
             # cap along instead. No-op when nothing nested is running. This
             # sits on the shared write path on purpose, so an automatic
             # AC-transition switch carries the cap along just like a manual
             # one does -- the game does not care which of the two moved it.
             if backend == "kscreen":
-                bridge_fps_limit(session, new_rate)
+                bridge_fps_limit(session, _rate_hz(new_rate))
             return
 
         now = time.monotonic()
@@ -616,13 +685,48 @@ class Z13DisplayPlugin(HHDPlugin):
         # rate every 15s would mean fighting KDE's own display settings for
         # anyone who deliberately changed the rate mid-session. Auto stays
         # quiet until the charger actually moves.
+        if rate_mode != "manual":
+            # Auto: report what the panel is ACTUALLY doing. Auto writes the
+            # rate once when the charger moves and then deliberately stays
+            # quiet (see the reconcile note below), so without this the
+            # control asserts "180 Hz on AC" and never confirms it -- and a
+            # switch that silently failed, or a rate someone changed in KDE,
+            # would look identical to one that worked.
+            #
+            # Read-only: it never writes the panel or the rate setting, so it
+            # cannot fight KDE the way a reconcile would. Only the display
+            # field moves.
+            #
+            # Gated on the mode rather than merely hidden by it, so selecting
+            # Manual actually stops the kscreen-doctor calls. Sharing the
+            # RECONCILE_INTERVAL_S clock keeps it to one spawn per interval.
+            live = read_rate(session, backend, display)
+            shown = f"{live} Hz" if live else "unavailable"
+            if shown != self.old_shown_rate:
+                self.old_shown_rate = shown
+                conf[
+                    "gamemode.display.status.available.refresh_rate.auto.current"
+                ] = shown
+            return
+
         if rate_mode == "manual":
             live = read_rate(session, backend, display)
-            if live is not None and live != self.old_rate:
+            # Compare against the Hz the SELECTION implies, not the selection
+            # itself. read_rate returns what kscreen reports -- "60" or "180",
+            # never "overdrive" -- so comparing raw would read the overdrive
+            # tier as permanent drift: every reconcile would overwrite the
+            # user's choice with "180" while leaving overdrive on in hardware,
+            # desyncing the control from the panel within RECONCILE_INTERVAL_S.
+            if live is not None and live != _rate_hz(self.old_rate):
                 self.old_rate = live
                 conf[
                     "gamemode.display.status.available.refresh_rate.manual.rate"
                 ] = live
+                # Genuine external drift, and `live` is a plain rate, so the
+                # overdrive tier is no longer selected. Clear the flag here --
+                # the apply branch above will not run, since old_rate now
+                # equals what the panel is already showing.
+                _apply_overdrive(False)
                 # Someone changed the rate outside hhd (KDE display settings, a
                 # script). The bridge applies the same either way.
                 if backend == "kscreen":

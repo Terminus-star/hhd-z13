@@ -1,0 +1,17 @@
+z13_firmware:
+  type: container
+  title: Firmware
+  tags: [ non-essential ]
+  hint: >-
+    ASUS firmware attributes, written straight to
+    /sys/class/firmware-attributes/asus-armoury.
+  children:
+    boot_sound:
+      type: bool
+      title: Boot POST Sound
+      tags: [ non-essential ]
+      default: True
+      hint: >-
+        The chime the firmware plays at power-on. Stored in firmware, so it
+        survives reinstalls and takes effect at the next cold boot rather
+        than immediately.

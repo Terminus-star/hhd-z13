@@ -3,3 +3,12 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Claude Code's scratch area, including git worktrees it creates under
+# .claude/worktrees/. Those are real checkouts of this repo living inside the
+# repo, so without this git sees each one as an embedded repository: `git add
+# -A` would try to swallow a second copy of the tree, and a merge refuses with
+#     error: Your local changes to the following files would be overwritten
+#     warning: unable to rmdir '.claude/worktrees/<name>': Directory not empty
+# because it wants to delete a path that is a live working directory.
+.claude/
