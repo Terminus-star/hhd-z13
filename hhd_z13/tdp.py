@@ -293,7 +293,13 @@ class Z13TdpPlugin(HHDPlugin):
         # One try/except around everything: hhd's run_plugin_cmd REMOVES a
         # plugin that raises, permanently, not just for this tick.
         try:
-            if MODE_PATH not in conf or CUSTOM_TDP not in conf:
+            # Every key _read() touches, not just two of them. A settings
+            # rebuild replaces the tree in place, so there is a window where
+            # some of adjustor's custom children are visible and others are
+            # not -- observed once as "prepare failed: 'boost'" right after a
+            # restart. Caught and logged rather than fatal, but a resume is
+            # exactly when that window is hit, so it is guarded instead.
+            if any(k not in conf for k in (MODE_PATH, CUSTOM_TDP, CUSTOM_BOOST)):
                 return
             self._hold_choice(conf)
             self._power_change(conf)
