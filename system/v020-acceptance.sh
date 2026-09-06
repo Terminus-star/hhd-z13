@@ -37,9 +37,14 @@ hd "1. Writer conflicts (the core of v0.2.0)"
 
 N=$(python3 /usr/local/lib/z13/hhd-qam-toggle-patch.py --check 2>/dev/null | grep -c PATCHED)
 T=$(python3 /usr/local/lib/z13/hhd-qam-toggle-patch.py --check 2>/dev/null | grep -c .)
-if [ "$N" = 6 ]; then p "patcher marks" "6/6 PATCHED"
-elif [ "$T" = 0 ]; then f "patcher marks" "patcher not installed at /usr/local/lib/z13/"
-else f "patcher marks" "$N/6 PATCHED — expected 6; run hhd-patches/install.sh"; fi
+# Compare against the number of rows the patcher REPORTS, not a hardcoded
+# count. Hardcoding 6 meant adding the AC backport as a 7th mark failed this
+# check at 7/6 -- a green machine reported as broken because the test knew a
+# stale total. The patcher is the authority on how many marks it has; the
+# check's job is only "are they all applied".
+if [ "$T" = 0 ]; then f "patcher marks" "patcher not installed at /usr/local/lib/z13/"
+elif [ "$N" = "$T" ]; then p "patcher marks" "$N/$T PATCHED"
+else f "patcher marks" "$N/$T PATCHED — run hhd-patches/install.sh"; fi
 
 N=$(jrn | grep -c "Setting CPU frequency scaling")
 [ "$N" = 0 ] && p "adjustor cpufreq writes" "0 (expected 0)" \
