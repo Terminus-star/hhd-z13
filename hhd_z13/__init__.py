@@ -5,6 +5,7 @@ from hhd.plugins import HHDPlugin
 from .plugin import Z13CpuPlugin
 from .display import Z13DisplayPlugin
 from .firmware import Z13FirmwarePlugin
+from .tdp import Z13TdpPlugin
 
 # DMI product_name substring identifying the hardware these plugins are for.
 # This machine reports "ROG Flow Z13 GZ302EA_GZ302EA"; the trailing SKU differs
@@ -53,4 +54,9 @@ def autodetect(existing: Sequence[HHDPlugin]) -> Sequence[HHDPlugin]:
         return existing
     if not _is_z13():
         return []
-    return [Z13CpuPlugin(), Z13DisplayPlugin(), Z13FirmwarePlugin()]
+    return [
+        Z13CpuPlugin(),
+        Z13DisplayPlugin(),
+        Z13FirmwarePlugin(),
+        Z13TdpPlugin(),
+    ]
