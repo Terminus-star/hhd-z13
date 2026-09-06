@@ -119,7 +119,14 @@ print("STOCKMODES " + ",".join(sorted(tv.get("modes", {}))))
 # z13_presets container at the container level would mean the superseded
 # layout is back.
 cust = tv.get("modes", {}).get("custom", {}).get("children", {})
-print("PRESETCTL " + str("z13_preset" in cust))
+# Saved presets are extra entries in adjustor's OWN dropdown, beside its four.
+allm = sorted(tv.get("modes", {}))
+print("MODES " + ",".join(allm))
+print("NPRESET " + str(len([m for m in allm if m.startswith("z13_p")])))
+# Each is a finished configuration: no sliders, only a way to delete it.
+_bad = [m for m in allm if m.startswith("z13_p")
+        and sorted((tv["modes"][m] or {}).get("children", {})) != ["remove"]]
+print("PRESETCTL " + str(not _bad))
 # The power-change policy is its own area, not nested in Custom -- it has to
 # be reachable from any mode, including the one KDE flips you to on unplug.
 print("POWERCTL " + str("z13_power" in asus))
@@ -135,7 +142,10 @@ print("SLOTKIDS " + str(sum(len((v or {}).get("children", {}) or {}) for v in _s
 # Power Limits is gated on TDP Boost: with boost off all three limits are the
 # same number, so the control is dropped from the tree rather than shown inert.
 print("BOOST " + str(stval("tdp.asus.tdp_v2.custom.boost")))
-print("PPTCTL " + str("z13_ppt" in cust))
+# PL2/PL3 are direct children of Custom, gated on TDP Boost -- not behind an
+# auto/manual dropdown, and not present at all when boost is off.
+print("PPTCTL " + str("z13_sppt" in cust and "z13_fppt" in cust))
+print("PPTDROP " + str("z13_ppt" in cust))
 print("APPLIEDTYPE " + str(cust.get("z13_applied", {}).get("type")))
 
 slots = sorted(cust.get("z13_preset", {}).get("modes", {}))
@@ -147,14 +157,16 @@ print("MODE " + str(mode))
 # Only Custom is driven by a preset. On any other mode adjustor owns the
 # limits outright and there is nothing of ours to assert.
 if mode == "custom":
-    print("ACTIVE " + str(stval("tdp.asus.tdp_v2.custom.z13_preset.mode") or "p1"))
+    print("ACTIVE custom (scratchpad)")
     # adjustor's own slider is the single editor, so it IS the target.
     print("WATTS " + str(stval("tdp.asus.tdp_v2.custom.tdp")))
     # The PL2/PL3 targets live in the plugin's store, which is also what the
     # patch reads -- deliberately not in the settings tree, because anything
     # declared there renders as an editable second source of truth.
     try:
-        with open("/etc/hhd/z13-tdp-presets.json") as f:
+        # NOT /etc/hhd: hhd watches that directory and reloads its whole
+        # configuration on any write there.
+        with open("/var/lib/hhd-z13/presets.json") as f:
             st_j = json.load(f)
         ap = st_j.get("applied") or {}
         print("TARGETS %s %s" % (ap.get("sppt", 0), ap.get("fppt", 0)))
@@ -172,13 +184,22 @@ else
   # adjustor's dropdown must be exactly its own four modes. A preset mode
   # appearing here would mean the superseded design is back, and with it the
   # bug where unplugging landed on Silent.
-  [ "$(echo "$EVAL" | sed -n 's/^STOCKMODES //p')" = "balanced,custom,performance,quiet" ] \
-    && p "adjustor's dropdown untouched" "balanced,custom,performance,quiet" \
-    || f "adjustor's dropdown untouched" "$(echo "$EVAL" | sed -n 's/^STOCKMODES //p')"
+  # adjustor's own four must all still be there. Saved presets ADD entries
+  # beside them, so this checks presence, not exclusivity -- asserting the
+  # exact set would fail the moment a preset is saved.
+  SM=$(echo "$EVAL" | sed -n 's/^STOCKMODES //p')
+  MISSING=""
+  for m in quiet balanced performance custom; do
+    echo ",$SM," | grep -q ",$m," || MISSING="$MISSING $m"
+  done
+  [ -z "$MISSING" ] && p "adjustor's own four modes intact" "$SM" \
+                    || f "adjustor's own four modes intact" "missing:$MISSING"
 
   [ "$(echo "$EVAL" | sed -n 's/^PRESETCTL //p')" = "True" ] \
-    && p "presets inside Custom" "present" \
-    || f "presets inside Custom" "z13_preset missing from custom"
+    && p "saved presets are uneditable" "only a remove action each" \
+    || f "saved presets are uneditable" "a preset carries editable controls"
+  i_ "TDP Mode entries" "$(echo "$EVAL" | sed -n 's/^MODES //p')"
+  i_ "saved presets" "$(echo "$EVAL" | sed -n 's/^NPRESET //p')"
 
   # Exactly one TDP control. Two means a preset grew its own slider back
   # beside adjustor's, which is the duplication this layout exists to remove.
@@ -202,17 +223,20 @@ else
   BOOST=$(echo "$EVAL" | sed -n 's/^BOOST //p')
   PPTCTL=$(echo "$EVAL" | sed -n 's/^PPTCTL //p')
   case "$BOOST:$PPTCTL" in
-    True:True|False:False) p "Power Limits gated on TDP Boost" "boost=$BOOST, shown=$PPTCTL" ;;
-    *) f "Power Limits gated on TDP Boost" "boost=$BOOST but shown=$PPTCTL" ;;
+    True:True|False:False) p "PL2/PL3 gated on TDP Boost" "boost=$BOOST, shown=$PPTCTL" ;;
+    *) f "PL2/PL3 gated on TDP Boost" "boost=$BOOST but shown=$PPTCTL" ;;
   esac
+  [ "$(echo "$EVAL" | sed -n 's/^PPTDROP //p')" = "False" ] \
+    && p "PL2/PL3 are direct sliders" "no auto/manual dropdown" \
+    || f "PL2/PL3 are direct sliders" "still behind a dropdown"
 
   [ "$(echo "$EVAL" | sed -n 's/^APPLIEDTYPE //p')" = "display" ] \
     && p "Applied is read-only telemetry" "display" \
     || f "Applied is read-only telemetry" "$(echo "$EVAL" | sed -n 's/^APPLIEDTYPE //p')"
 
-  SLOTS=$(echo "$EVAL" | sed -n 's/^SLOTS //p')
+  SLOTS=$(echo "$EVAL" | sed -n 's/^NPRESET //p')
   NSTORED=$(echo "$EVAL" | sed -n 's/^NSTORED //p')
-  NSLOT=$(echo "$SLOTS" | tr ',' '\n' | grep -c .)
+  NSLOT=${SLOTS:-0}
   # The slot list is generated from the store, so a disagreement means a
   # rebuild was missed and Add/Remove has silently stopped working.
   if [ -z "$NSTORED" ]; then s "slots match the store" "not on Custom"

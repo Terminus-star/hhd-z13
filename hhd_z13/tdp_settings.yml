@@ -1,103 +1,77 @@
-# TDP presets, layered onto adjustor's own Custom mode.
+# TDP presets: saved configurations that sit in adjustor's own TDP Mode
+# dropdown, beside Silent / Performance / Turbo / Custom.
 #
-# ONE SLIDER, NOT TWO
-#   adjustor's Custom mode renders its own TDP and TDP Boost controls, and
-#   they are the ones that drive the hardware. So they are THE editor here:
-#   selecting a preset LOADS its stored values into them, and editing them
-#   SAVES back into the selected preset.
+# THE SHAPE
+#   Custom is the scratchpad. You set TDP, TDP Boost and the two boost limits
+#   there, and "Add Preset" freezes the current values into a new entry in the
+#   dropdown above. Those entries are complete configurations: selecting one
+#   applies it, and it carries no sliders, because a saved preset that could
+#   be edited in place is just Custom with extra steps.
 #
-#   An earlier attempt gave each preset its own sliders and hid adjustor's by
-#   tagging them `hide`. That does not work -- verified against the live tree,
-#   where the tags read ['hide'] and hhd-ui rendered the controls anyway.
-#   `hide` is honoured for hhd's own `version` field and evidently not for
-#   ordinary controls, so a duplicate can only be removed structurally.
+# WHY PRESET MODES ARE VIABLE AGAIN
+#   An earlier attempt at this lost to KDE: adjustor's ppd handler mapped an
+#   incoming power profile onto a stock mode and force-wrote it, so a preset
+#   mode was replaced a second or two after being selected. That turned out to
+#   be adjustor answering an ECHO of its own report -- the z13-tdp-presets
+#   patch's ppd-echo entry ignores those now, so a selected mode stays put.
 #
-# WHERE THE PRESETS ARE STORED
-#   In the plugin's own JSON file, NOT in this tree. Anything declared here
-#   renders, and per-slot values are state rather than controls -- putting
-#   them in the settings tree is precisely what forced a second set of
-#   sliders to appear. See tdp.py's STORE_PATH.
+# WHY PL2/PL3 SIT DIRECTLY UNDER TDP BOOST
+#   They are what TDP Boost buys: with boost off all three limits are the same
+#   number, so they are omitted from the tree entirely then. With it on they
+#   follow PL1 automatically -- moving the TDP slider recomputes both from
+#   this panel's own firmware proportions -- and can then be nudged. Keeping
+#   them adjacent to the slider they track is what stops them drifting into
+#   limits that have nothing to do with the sustained value.
 #
-# WHY POWER LIMITS IS GATED ON TDP BOOST
-#   Boost off means PL1 = PL2 = PL3: there is no short or fast limit to
-#   configure, so the control would be inert. tdp.py omits it from the tree
-#   entirely while boost is off and asks hhd to rebuild, which is the same
-#   mechanism Add/Remove use.
+# THE PRESET LIST IS DYNAMIC
+#   hhd fixes a mode's entries when settings() runs, so add/remove works by
+#   editing the store and asking hhd to rebuild the tree. The modes below are
+#   filled in by tdp.py; this file provides the pieces.
 
 # ── merged into adjustor's custom mode ────────────────────────────────────
-# Every key is z13_-prefixed so nothing collides with adjustor's own `tdp`
-# and `boost` children in the same container.
+# z13_-prefixed so nothing collides with adjustor's own `tdp` and `boost`.
 z13_custom_children:
 
-  z13_preset:
-    type: mode
-    title: Preset
-    tags: [dropdown]
-    # Slot containers are EMPTY on purpose -- a preset's values live in the
-    # JSON store and are edited through adjustor's sliders above. Giving them
-    # children here is what produced the duplicate sliders.
-    #
-    # Filled in by tdp.py from the stored slot count.
-    modes: {}
-
-  z13_ppt:
-    type: mode
-    title: Power Limits
-    tags: [dropdown]
-    default: auto
+  z13_sppt:
+    type: int
+    title: PL2  (short boost)
+    # Ceilings are asus-armoury's own max_value figures. Its MINIMA are
+    # ignored, for the same reason PL1's advertised 28 W is: they are the
+    # interface's limits, not the hardware's. tdp.py enforces
+    # PL1 <= PL2 <= PL3 before writing, because the firmware REJECTS a lower
+    # tier that exceeds a higher one rather than clamping it.
+    min: 5
+    max: 92
+    step: 1
+    default: 56
+    unit: W
     hint: >-
-      How the short (PL2) and fast (PL3) limits are chosen. Auto scales them
-      from the sustained limit using the proportions this machine's firmware
-      ships -- 60/75/86 W, so 1.25x and 1.433x -- capped at its 92/93 W
-      maxima. Manual states them outright. Only shown while TDP Boost is on,
-      because with boost off all three limits are the same number.
-    modes:
-      auto:
-        type: container
-        title: Auto (this panel's firmware ratios)
-      manual:
-        type: container
-        title: Manual
-        children:
-          sppt:
-            type: int
-            title: PL2  (short boost)
-            # Ceilings are asus-armoury's own max_value figures. Its MINIMA
-            # are ignored, for the same reason PL1's 28 W is: they are the
-            # interface's advertised limits, not the hardware's. tdp.py
-            # enforces PL1 <= PL2 <= PL3 before writing, because the firmware
-            # REJECTS a lower tier that exceeds a higher one rather than
-            # clamping it.
-            min: 5
-            max: 92
-            step: 1
-            default: 56
-            unit: W
-            hint: >-
-              Short-duration limit. Raised to the sustained value
-              automatically if you set it lower.
-          fppt:
-            type: int
-            title: PL3  (fast boost)
-            min: 5
-            max: 93
-            step: 1
-            default: 64
-            unit: W
-            hint: >-
-              Fastest-duration limit. Raised to PL2 automatically if you set
-              it lower.
+      Short-duration limit. Follows the TDP slider automatically -- moving it
+      recomputes this from the proportions this machine's firmware ships
+      (60/75/86 W, so 1.25x) -- and can be adjusted afterwards. Raised back to
+      the sustained value if you set it lower.
+
+  z13_fppt:
+    type: int
+    title: PL3  (fast boost)
+    min: 5
+    max: 93
+    step: 1
+    default: 64
+    unit: W
+    hint: >-
+      Fastest-duration limit, 1.433x the sustained value by default. Follows
+      the TDP slider the same way, and is raised back to PL2 if you set it
+      lower.
 
   z13_applied:
-    # Live telemetry, read back from asus-nb-wmi -- the same interface
-    # adjustor writes. Deliberately a display and not a pair of sliders: the
-    # limits are derived from the preset, so editable copies would be two
-    # sources of truth racing each other. Same shape as the refresh-rate
-    # indicator: read the hardware, show it, never write it.
+    # Live telemetry, read back from asus-nb-wmi -- the interface adjustor
+    # writes. Read-only on the same contract as the refresh-rate indicator:
+    # read the hardware, show it, never write it.
     type: display
     title: Applied
     hint: >-
-      What the three power limits actually are right now, read from
+      What the three limits actually are right now, read from
       /sys/devices/platform/asus-nb-wmi/. Not asus-armoury, which reports the
       firmware profile's own numbers rather than the live override.
 
@@ -105,16 +79,9 @@ z13_custom_children:
     type: action
     title: Add Preset
     hint: >-
-      Appends a slot, copying the values of the one selected above so a new
-      preset starts from something useful. Rebuilds the settings tree, so the
-      panel reloads briefly.
-
-  z13_remove:
-    type: action
-    title: Remove Preset
-    hint: >-
-      Deletes the selected preset. The last one cannot be removed. Rebuilds
-      the settings tree, so the panel reloads briefly.
+      Saves the current TDP, boost and limits as a new entry in the TDP Mode
+      dropdown above. Rebuilds the settings tree, so the panel reloads
+      briefly.
 
   z13_status:
     # Empty renders as nothing, so this is invisible unless something is
@@ -124,10 +91,21 @@ z13_custom_children:
     tags: []
 
 
-# ── its own area, beside adjustor's TDP Mode selector ─────────────────────
-# NOT nested inside Custom. It selects which preset to apply, which is a
-# policy that has to be reachable from any mode -- including the one KDE
-# flips you to on unplug.
+# ── one saved preset, copied per slot by tdp.py ───────────────────────────
+# Deliberately holds no sliders. It is a finished configuration; the place to
+# change values is Custom, and "Add Preset" there to save a new one.
+preset_template:
+  type: container
+  children:
+    remove:
+      type: action
+      title: Remove This Preset
+      hint: >-
+        Deletes this preset and returns to Custom. Rebuilds the settings tree,
+        so the panel reloads briefly.
+
+
+# ── its own area, beside the TDP Mode selector ────────────────────────────
 z13_power:
   type: mode
   title: Preset on Power Change
@@ -135,7 +113,7 @@ z13_power:
   # you chose by hand.
   default: disabled
   hint: >-
-    Apply a preset automatically when the charger is plugged in or unplugged.
+    Switch TDP Mode automatically when the charger is plugged in or unplugged.
     Edge-triggered -- it acts on the transition, never continuously, so a
     change you make by hand afterwards stays. On startup it adopts the current
     power source without applying anything.
@@ -147,8 +125,8 @@ z13_power:
       type: container
       title: Enabled
       children:
-        # `options` for both are filled in by tdp.py: the presets that
-        # currently exist, plus adjustor's three stock profiles.
+        # `options` are filled in by tdp.py: the saved presets that currently
+        # exist, plus adjustor's three stock profiles.
         ac_preset:
           type: multiple
           title: On AC

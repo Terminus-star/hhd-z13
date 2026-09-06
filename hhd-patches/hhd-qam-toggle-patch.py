@@ -627,6 +627,44 @@ ADJUSTOR_FUSE_PATCHES = (
 #   report as "TDP doesn't come back after sleep".
 ADJUSTOR_ASUS_PATCHES = (
     (
+        "preset-fallthrough",
+        '        if tdp_reset and mode != "custom":\n',
+        """\
+        # {mark}: name the three modes upstream actually handles, instead of
+        # "anything that is not custom". hhd-z13 adds saved presets as extra
+        # entries in this same dropdown, and the match below ends in `case _:`
+        # meaning performance -- so a preset would set the Turbo thermal
+        # profile here and then write no power limit at all.
+        #
+        # Identical behaviour with no presets saved: tdp_reset is only ever
+        # True when mode is not None, and the only non-None values upstream
+        # itself produces are these three and "custom".
+        if tdp_reset and mode in ("quiet", "balanced", "performance"):
+""",
+        'if tdp_reset and mode in ("quiet", "balanced", "performance"):',
+        "replace",
+    ),
+    (
+        "preset-apply",
+        '        if mode == "custom":\n',
+        """\
+        # {mark}: run the custom apply path for hhd-z13's saved presets too.
+        # Everything inside reads tdp.asus.tdp_v2.custom.tdp and .custom.boost,
+        # and hhd-z13 writes the selected preset's values into exactly those
+        # keys from prepare(), which runs before this update() in the same
+        # tick. So the clamping, the debounce, the thermal-profile selection,
+        # the PPD report and the resume/AC re-apply all work unchanged, with
+        # no second PPT writer anywhere.
+        #
+        # Written as "not one of the three fixed modes" so this file never
+        # needs to know hhd-z13's mode names. mode is None-guarded because
+        # upstream skipped this branch for None.
+        if mode == "custom" or (mode and mode not in ("quiet", "balanced", "performance")):
+""",
+        'if mode == "custom" or (mode and mode not in',
+        "replace",
+    ),
+    (
         "ppt-override",
         "                self.queue_tdp = None\n                if boost:\n",
         """\
@@ -651,7 +689,7 @@ ADJUSTOR_ASUS_PATCHES = (
                 # that exceeds a higher one rather than clamping it.
                 try:
                     import json as _z13_json
-                    with open("/etc/hhd/z13-tdp-presets.json") as _z13_fd:
+                    with open("/var/lib/hhd-z13/presets.json") as _z13_fd:
                         _z13_a = _z13_json.load(_z13_fd).get("applied") or {{}}
                     _z13_s = int(_z13_a.get("sppt", 0))
                     _z13_f = int(_z13_a.get("fppt", 0))
