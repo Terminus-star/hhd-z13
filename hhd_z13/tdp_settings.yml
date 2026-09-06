@@ -64,17 +64,6 @@ z13_custom_children:
       the TDP slider the same way, and is raised back to PL2 if you set it
       lower.
 
-  z13_applied:
-    # Live telemetry, read back from asus-nb-wmi -- the interface adjustor
-    # writes. Read-only on the same contract as the refresh-rate indicator:
-    # read the hardware, show it, never write it.
-    type: display
-    title: Applied
-    hint: >-
-      What the three limits actually are right now, read from
-      /sys/devices/platform/asus-nb-wmi/. Not asus-armoury, which reports the
-      firmware profile's own numbers rather than the live override.
-
   z13_add:
     type: action
     title: Add Preset
@@ -89,6 +78,23 @@ z13_custom_children:
     type: display
     title: " "
     tags: []
+
+
+# ── always visible, whatever TDP Mode is selected ─────────────────────────
+# A sibling of the TDP Mode selector rather than a child of Custom, so it
+# still reports while a saved preset or a stock profile is active -- which is
+# exactly when you most want to know what the hardware is actually doing,
+# because those modes offer no sliders to read the answer off.
+z13_applied:
+  # Live telemetry, read back from asus-nb-wmi -- the interface adjustor
+  # writes. Read-only on the same contract as the refresh-rate indicator:
+  # read the hardware, show it, never write it.
+  type: display
+  title: Applied Power Limits
+  hint: >-
+    What the three limits actually are right now, read from
+    /sys/devices/platform/asus-nb-wmi/. Not asus-armoury, which reports the
+    firmware profile's own numbers rather than the live override.
 
 
 # ── one saved preset, copied per slot by tdp.py ───────────────────────────

@@ -74,10 +74,11 @@ def mkconf(mode="custom", power="disabled", ac="z13_p1", dc="z13_p2",
                 "custom": {
                     "tdp": tdp, "boost": boost,          # adjustor's own
                     "z13_sppt": sppt, "z13_fppt": fppt,  # ours
-                    "z13_applied": "", "z13_add": False, "z13_status": "",
+                    "z13_add": False, "z13_status": "",
                 },
                 **modes,
             },
+            "z13_applied": "",
             "z13_power": {"mode": power,
                           "enabled": {"ac_preset": ac, "dc_preset": dc}},
         }},
@@ -121,9 +122,13 @@ ok("z13_ppt" not in kids, "the auto/manual dropdown is gone")
 off = plugin(boost=False).settings()["tdp"]["asus"]["children"]["tdp_v2"]["modes"]["custom"]["children"]
 ok("z13_sppt" not in off and "z13_fppt" not in off,
    f"PL2/PL3 GONE while boost is off ({sorted(off)})")
-ok("z13_applied" in off, "telemetry stays either way")
-
-ok(kids["z13_applied"]["type"] == "display", "Applied is read-only telemetry")
+# Telemetry is a SIBLING of the TDP Mode selector, not a child of Custom: the
+# reading matters most while a preset or a stock profile is active, which is
+# exactly when Custom's sliders are not on screen to read it off.
+ok("z13_applied" not in off and "z13_applied" not in kids,
+   "telemetry is not inside Custom")
+ok(asus["z13_applied"]["type"] == "display",
+   "Applied is read-only telemetry, beside the TDP Mode selector")
 ok("z13_power" in asus and "z13_power" not in kids,
    "the power-change policy is its own area")
 opts = asus["z13_power"]["modes"]["enabled"]["children"]["ac_preset"]["options"]
