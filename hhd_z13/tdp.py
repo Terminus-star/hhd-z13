@@ -183,6 +183,7 @@ class Z13TdpPlugin(HHDPlugin):
 
         self.old_ac = None         # None = first tick adopts, never applies
         self._hold = None          # (mode, deadline) while a transition settles
+        self._recheck = False      # re-evaluate the policy without an edge
         self.old_state = None      # (mode, watts, boost, sppt, fppt)
         self.old_applied = None    # last telemetry string written
         self._patched = None
@@ -190,6 +191,25 @@ class Z13TdpPlugin(HHDPlugin):
 
     def open(self, emit, context, *args, **kwargs):
         self.emit = emit
+
+    def notify(self, events):
+        """Watch for a resume.
+
+        The power-change policy is edge-triggered, which is right while the
+        system is running and wrong across a suspend: hibernate restores this
+        process from the image with old_ac exactly as it was, so a charger
+        moved while the machine was OFF produces no edge to act on. Observed
+        after a hibernate -- on battery, dc_preset set, and the mode still on
+        whatever was selected beforehand, because nothing had transitioned
+        from hhd's point of view.
+
+        A resume is therefore treated as "re-evaluate", not "adopt": the
+        power source is authoritative again, whether or not it changed while
+        we were not running.
+        """
+        for ev in events:
+            if ev.get("type") == "special" and ev.get("event") == "wakeup":
+                self._recheck = True
 
     # ── the store ─────────────────────────────────────────────────────────
     def _load(self):
@@ -425,12 +445,18 @@ class Z13TdpPlugin(HHDPlugin):
         ac = _on_ac()
         if ac is None:
             return  # unreadable: leave everything alone rather than guess
+
+        recheck, self._recheck = self._recheck, False
+
         if self.old_ac is None:
             self.old_ac = ac
-            return
-        if ac == self.old_ac:
+            if not recheck:
+                return
+        elif ac == self.old_ac and not recheck:
             # Not continuous: a mode picked by hand after a transition stays
-            # until the next transition.
+            # until the next transition. A resume is the one exception -- see
+            # notify() -- because the transition may have happened while this
+            # process was not running to see it.
             return
         self.old_ac = ac
         key = "ac_preset" if ac else "dc_preset"

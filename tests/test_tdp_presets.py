@@ -354,6 +354,50 @@ p2._hold = ("z13_p1", clock.now + 100)
 p2.prepare(c2)
 ok(p2._hold is None, "disabling the policy drops the hold")
 
+
+# --- a resume re-evaluates, with no edge to trigger on ---------------------
+# Hibernate restores this process from the image with old_ac exactly as it
+# was, so a charger moved while the machine was OFF produces no transition.
+# Observed after a hibernate: on battery, dc_preset set, and the mode still
+# whatever was selected beforehand.
+clock.now += 100
+store([{"tdp": 45, "boost": True, "sppt": 56, "fppt": 64},
+       {"tdp": 9, "boost": True, "sppt": 11, "fppt": 13}])
+p = plugin()
+c = mkconf(mode="balanced", power="enabled", ac="balanced", dc="z13_p2", presets=2)
+with_ac(False)
+p.prepare(c)                      # first tick adopts: battery, no action
+ok(c[t.MODE_PATH].to(str) == "balanced", "steady state leaves the mode alone")
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced", "and keeps leaving it alone — no edge")
+
+p.notify([{"type": "special", "event": "wakeup"}])
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2",
+   f"a resume applies the preset for the CURRENT source ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, "and its values")
+
+# The resume arms the hold too, which is right: KDE changes its power profile
+# on resume just as it does on unplug, so the choice has to survive that.
+c[t.MODE_PATH] = "quiet"
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2", "the resume choice is held like any other")
+
+# One re-evaluation per resume, not a permanent loss of edge-triggering.
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "balanced"
+p.prepare(c)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced",
+   "afterwards it is edge-triggered again, so a hand-picked mode sticks")
+
+# Unrelated events must not trigger it.
+p.notify([{"type": "special", "event": "something_else"}, {"type": "ppd"}])
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "balanced"
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced", "other events do not force a re-evaluation")
+
 # A rebuild is fatal to an unpatched adjustor -- it clears tdp_ready, which
 # has no default, and adjustor only ever sets it once behind a latched
 # self.init. The whole TDP section disappears until hhd restarts.
