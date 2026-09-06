@@ -61,7 +61,6 @@ z13_display:
                     current:
                       type: display
                       title: Current
-                      tags: [ non-essential ]
                       hint: >-
                         What the panel is actually running at, read back from
                         the compositor rather than inferred from the power
