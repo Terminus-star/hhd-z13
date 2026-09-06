@@ -1,166 +1,204 @@
-# Extra TDP presets, contributed INTO adjustor's own tdp.asus.tdp_v2 dropdown.
+# User-created TDP presets, applied through adjustor's OWN Custom mode.
 #
-# NOTHING HERE WRITES HARDWARE.
-#   hhd_z13/tdp.py mirrors the selected preset's tdp/boost into
-#   tdp.asus.tdp_v2.custom.tdp and .custom.boost from prepare(), and adjustor's
-#   existing custom-mode apply path does the PPT writes. That is the whole
-#   point of v0.4.0: hand TDP ownership back to adjustor instead of growing a
-#   second writer. See hhd-patches/hhd-qam-toggle-patch.py's z13-tdp-presets
-#   table, which is what makes adjustor treat these modes as custom -- without
-#   it they select the Turbo thermal profile and write no PPT at all, which
-#   the status field at the bottom of this file reports.
+# HOW A PRESET IS APPLIED
+#   Selecting one writes tdp.asus.tdp_v2.custom.tdp / .custom.boost and sets
+#   tdp.asus.tdp_v2.mode to "custom" -- the identical path a user takes by
+#   hand. adjustor then does every hardware write.
 #
-# THE CHILDREN ARE NAMED `tdp` AND `boost` ON PURPOSE
-#   Exactly adjustor's own custom-mode children, so the mirror is a two-key
-#   copy rather than a mapping table that has to be kept in sync.
+#   Reusing the stock path rather than adding preset MODES is deliberate and
+#   is what makes this survive KDE. Unplugging makes KDE change its power
+#   profile; adjustor maps that onto a stock mode and force-writes it over the
+#   config. Against a preset mode that silently replaced the user's choice
+#   (observed: unplugging landed on Silent). Against Custom it only flips the
+#   visible LABEL, because the quiet branch writes a fan curve and never
+#   touches PPT -- so the wattage survives. That is behaviour stock Custom has
+#   always had, and inheriting it is worth more than owning a dropdown entry.
 #
-# NO YAML ALIASES FOR THE LEAF CONTROLS
-#   A plain alias would make all four slots reference the SAME dict object.
-#   The settings tree is walked and annotated in several places, so four slots
-#   sharing one object is a hazard for the sake of forty lines. Written out.
+# THE PRESET LIST IS DYNAMIC
+#   hhd fixes a mode's entries when settings() runs, so add/remove works by
+#   storing a count and asking hhd to rebuild the tree. `active.modes` and the
+#   two power-change dropdowns below are therefore filled in by tdp.py, not
+#   written here -- this file provides the TEMPLATE for one preset and the
+#   shell around it.
 
-z13_tdp_presets:
-  type: mode
-  # NO title, NO default, NO tags -- deliberately.
-  #   merge_reduce()'s pick_tag() resolves every tag as
-  #   b.get(tag, a.get(tag, default)), and plugins merge in ascending priority
-  #   order, so adjustor (6) is `a` and we (11) are `b`. Supplying any of them
-  #   here would OVERWRITE adjustor's "TDP Mode" title and its
-  #   `default: balanced`. Omitting them inherits both.
-  #
-  #   `type` is the one key that is REQUIRED: merge_reduce only unions `modes`
-  #   when b["type"] == a["type"] (hhd/plugins/settings.py). Get it wrong and
-  #   our modes are silently dropped instead of erroring.
-  modes:
+# ── one preset ────────────────────────────────────────────────────────────
+# Deep-copied per slot by tdp.py. Never referenced by a YAML alias: aliases
+# would make every slot the same dict object, and the settings tree is walked
+# and annotated in several places.
+preset_template:
+  type: container
+  title: Preset
+  children:
 
-    z13_ac:
-      type: container
-      # Role names, not wattages. Titles are static YAML while the sliders
-      # below are editable, so a title like "Quiet 15 W" becomes a lie the
-      # moment someone drags that slot. Roles stay true under editing.
-      title: Custom · Plugged In
-      children:
-        tdp:
-          type: int
-          title: TDP
-          # 5 and 65 are adjustor's own Z1_DATA min_tdp/max_tdp for this
-          # machine, and 65 is what it clamps to whenever "Enforce Device TDP
-          # Limits" is on -- its default. Matching that range EXACTLY is what
-          # keeps the two of us from fighting: adjustor's clamp never has
-          # anything to clamp, so it never writes custom.tdp back, so tdp.py
-          # never re-mirrors over the top of it.
-          #
-          # Deliberately NOT widened to max_tdp_oc (90) when enforce_limits is
-          # off: a dynamic max needs a settings regeneration, and reopens
-          # exactly that clamp fight. 90 W stays reachable through the stock
-          # Custom mode.
-          min: 5
-          max: 65
-          step: 1
-          default: 45
-          unit: W
-          hint: >-
-            Sustained power target for this preset. Verify it with
-            `cat /sys/devices/platform/asus-nb-wmi/ppt_pl1_spl` -- NOT through
-            asus-armoury, which reports the firmware profile's own numbers
-            rather than the live override and looks like a failure that did
-            not happen.
-        boost:
-          type: bool
-          title: TDP Boost
-          default: True
-          hint: >-
-            Lets the short and fast limits rise above the sustained one. On
-            this machine it only does anything BELOW 35 W -- adjustor computes
-            them from a constant chosen for the ROG Ally, so at 35 W and above
-            all three limits collapse to the same number.
+    tdp:
+      type: int
+      title: TDP  (PL1, sustained)
+      # 5 and 65 are adjustor's own Z1_DATA min_tdp/max_tdp for this machine,
+      # and 65 is what it clamps to while "Enforce Device TDP Limits" is on --
+      # its default. Matching that range exactly means its clamp never fires,
+      # so it never writes custom.tdp back underneath us.
+      #
+      # The floor really is 5 W. asus-armoury advertises 28, but that is the
+      # interface's own advertised minimum, not a hardware limit: 9, 15 and
+      # 20 W are all measured working on this machine.
+      min: 5
+      max: 65
+      step: 1
+      default: 45
+      unit: W
+      hint: >-
+        Sustained power target. Check it with
+        `cat /sys/devices/platform/asus-nb-wmi/ppt_pl1_spl` -- not through
+        asus-armoury, which reports the firmware profile's own numbers rather
+        than the live override.
 
-    z13_dc:
-      type: container
-      title: Custom · On Battery
-      children:
-        tdp:
-          type: int
-          title: TDP
-          min: 5
-          max: 65
-          step: 1
-          default: 20
-          unit: W
-          hint: >-
-            Sustained power target for this preset. Low values are the reason
-            this feature exists: the floor really is 5 W, and 9/15/20 W are all
-            known good on this hardware.
-        boost:
-          type: bool
-          title: TDP Boost
-          default: True
-          hint: >-
-            Lets the short and fast limits rise above the sustained one. Most
-            useful exactly here, since it only has an effect below 35 W.
+    boost:
+      type: bool
+      title: TDP Boost
+      default: True
+      hint: >-
+        Lets the short and fast limits rise above the sustained one. Only has
+        an effect BELOW 35 W: adjustor derives them with a constant chosen for
+        the ROG Ally, so at 35 W and above all three collapse to the same
+        number. Ignored entirely when Power Limits below is set to Manual.
 
-    z13_game:
-      type: container
-      title: Custom · Gaming
-      children:
-        tdp:
-          type: int
-          title: TDP
-          min: 5
-          max: 65
-          step: 1
-          default: 60
-          unit: W
-          hint: >-
-            Sustained power target for this preset. Above 35 W the boost
-            toggle below stops making any difference.
-        boost:
-          type: bool
-          title: TDP Boost
-          default: True
-          hint: >-
-            No effect at this preset's default, which is above the 35 W
-            threshold. Kept so the slot behaves like the others if you lower
-            it.
-
-    z13_alt:
-      type: container
-      title: Custom · Alternate
-      children:
-        tdp:
-          type: int
-          title: TDP
-          min: 5
-          max: 65
-          step: 1
-          default: 45
-          unit: W
-          hint: >-
-            A spare slot. Sustained power target, same range as the others.
-        boost:
-          type: bool
-          title: TDP Boost
-          default: True
-          hint: >-
-            Lets the short and fast limits rise above the sustained one, below
-            35 W only.
+    ppt:
+      type: mode
+      title: Power Limits
+      tags: [dropdown]
+      default: auto
+      hint: >-
+        Auto derives the short (PL2) and fast (PL3) limits from the sustained
+        one, which is what adjustor does on its own. Manual states all three
+        outright -- the only way to get a meaningful PL2/PL3 split at or above
+        35 W, where the boost toggle stops doing anything.
+      modes:
+        auto:
+          type: container
+          title: Auto (derived from TDP)
+        manual:
+          type: container
+          title: Manual
+          children:
+            sppt:
+              type: int
+              title: PL2  (short boost)
+              # Ceilings from asus-armoury's max_value, which corroborate
+              # z13ctl-plus's documented caps. Its MINIMA are ignored for the
+              # same reason as PL1's. tdp.py enforces PL1 <= PL2 <= PL3 before
+              # writing, because the firmware REJECTS a lower tier that
+              # exceeds a higher one rather than clamping it.
+              min: 5
+              max: 92
+              step: 1
+              default: 45
+              unit: W
+              hint: >-
+                Short-duration limit. Raised to the sustained value
+                automatically if you set it lower.
+            fppt:
+              type: int
+              title: PL3  (fast boost)
+              min: 5
+              max: 93
+              step: 1
+              default: 45
+              unit: W
+              hint: >-
+                Fastest-duration limit. Raised to PL2 automatically if you set
+                it lower.
 
 
-# Sibling of tdp_v2 inside adjustor's "Asus TDP" container.
+# ── the container tdp.py mounts ───────────────────────────────────────────
+z13_presets:
+  type: container
+  title: Custom Presets
+  hint: >-
+    Named power profiles applied through adjustor's Custom mode. The TDP Mode
+    selector above will read "Custom" while one is active.
+  children:
+
+    active:
+      type: mode
+      title: Preset
+      tags: [dropdown]
+      # `modes` is filled in by tdp.py from the stored count. Left empty here
+      # rather than omitted so the shape is obvious when reading this file.
+      modes: {}
+
+    add:
+      type: action
+      title: Add Preset
+      hint: >-
+        Appends a slot, copying the values of the one selected above so a new
+        preset starts from something useful. Rebuilds the settings tree, so
+        the panel reloads briefly.
+
+    remove:
+      type: action
+      title: Remove Preset
+      hint: >-
+        Deletes the selected preset. The last one cannot be removed. Rebuilds
+        the settings tree, so the panel reloads briefly.
+
+    count:
+      type: int
+      title: Preset Slots
+      # How many slots exist. Persisted here so the list survives a restart --
+      # settings() cannot ask the config, so tdp.py reads this in update() and
+      # rebuilds if it disagrees with what it last generated.
+      #
+      # Visible rather than hidden on purpose: it is the honest way to see and
+      # repair the count if an add/remove ever leaves it inconsistent.
+      tags: [non-essential]
+      min: 1
+      max: 8
+      step: 1
+      default: 2
+      hint: >-
+        Number of preset slots. Normally changed with the buttons above.
+
+    # Written by tdp.py, read by adjustor via the z13-tdp-presets patch. Both
+    # zero means "derive them", which is upstream's behaviour and what the
+    # stock Custom mode always gets.
+    sppt:
+      type: int
+      title: Applied PL2
+      tags: [non-essential]
+      min: 0
+      max: 92
+      step: 1
+      default: 0
+      unit: W
+      hint: >-
+        Read-only in practice — set from the active preset. 0 means the limit
+        is derived rather than stated.
+    fppt:
+      type: int
+      title: Applied PL3
+      tags: [non-essential]
+      min: 0
+      max: 93
+      step: 1
+      default: 0
+      unit: W
+      hint: >-
+        Read-only in practice — set from the active preset. 0 means the limit
+        is derived rather than stated.
+
+
+# ── power-change policy ───────────────────────────────────────────────────
 z13_tdp_auto:
   type: mode
   title: Preset on Power Change
-  # Default DISABLED. Present-but-off is the least-surprising default for a
-  # release: enabling it means unplugging can move you off a mode you chose by
-  # hand, and this machine's own z13ctl-plus power policy is currently disabled
-  # too, so shipping it on would be a behaviour change nobody asked for.
+  # Default disabled: enabling it means unplugging can move you off something
+  # you chose by hand.
   default: disabled
   hint: >-
-    Switch the TDP Mode above automatically when the charger is plugged in or
-    unplugged. Edge-triggered only -- it acts on the transition and never
-    continuously, so a mode you pick by hand afterwards sticks until the NEXT
-    transition. On startup it adopts the current power source without changing
-    anything.
+    Apply a preset automatically when the charger is plugged in or unplugged.
+    Edge-triggered -- it acts on the transition, never continuously, so a
+    change you make by hand afterwards stays. On startup it adopts the current
+    power source without applying anything.
   modes:
     disabled:
       type: container
@@ -169,63 +207,22 @@ z13_tdp_auto:
       type: container
       title: Enabled
       children:
+        # `options` for both are filled in by tdp.py: the presets that
+        # currently exist, plus adjustor's three stock profiles.
         ac_preset:
           type: multiple
           title: On AC
           tags: [dropdown]
-          # Quoted per the house rule. These particular keys start with a
-          # letter so YAML 1.1 cannot mangle them, but the rule exists because
-          # a bare 60/on/off silently becomes an int or a bool, and an
-          # exception for "keys that look safe" is how that bug returns.
-          default: "z13_ac"
-          options:
-            # Adjustor's three stock profiles are offered too -- "on battery,
-            # just use Silent" is a legitimate policy, and leaving them out
-            # would force anyone who wants it to burn a custom slot
-            # reproducing a profile that already exists.
-            #
-            # LABELS DELIBERATELY MATCH ADJUSTOR'S, NOT THE KEYS. Its keys and
-            # its titles do not agree: `balanced` is displayed as
-            # "Performance" and `performance` as "Turbo", following ASUS
-            # Armoury Crate's naming. Naming these by their keys would put two
-            # different meanings of "Performance" in one dropdown.
-            "quiet": Silent
-            "balanced": Performance
-            "performance": Turbo
-            "z13_ac": Custom · Plugged In
-            "z13_dc": Custom · On Battery
-            "z13_game": Custom · Gaming
-            "z13_alt": Custom · Alternate
-          hint: >-
-            Which mode to select when the charger is plugged in. Silent,
-            Performance and Turbo are adjustor's own firmware profiles, which
-            set a fan curve rather than a power limit.
+          options: {}
         dc_preset:
           type: multiple
           title: On Battery
           tags: [dropdown]
-          default: "z13_dc"
-          options:
-            # Same list as On AC above, and the same label caveat: these are
-            # adjustor's visible titles, which do not match its internal keys.
-            "quiet": Silent
-            "balanced": Performance
-            "performance": Turbo
-            "z13_ac": Custom · Plugged In
-            "z13_dc": Custom · On Battery
-            "z13_game": Custom · Gaming
-            "z13_alt": Custom · Alternate
-          hint: >-
-            Which mode to select when running on battery. Note that KDE also
-            switches its own power profile on unplug, which adjustor maps onto
-            Silent; the preset chosen here is held across that for a few
-            seconds so it wins, and anything you pick by hand afterwards
-            still sticks.
+          options: {}
 
 
-# Filled by tdp.py. Same mechanism adjustor uses for its own "Steam is
-# controlling TDP" banner: an empty string renders as nothing, so this is
-# invisible unless there is something wrong to say.
+# Filled by tdp.py. An empty string renders as nothing, so this is invisible
+# unless there is something wrong to report.
 z13_tdp_status:
   type: display
   title: " "

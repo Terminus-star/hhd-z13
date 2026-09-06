@@ -12,36 +12,39 @@ false version is the intuitive one and it will be reinvented otherwise.
 
 ## 1. What it does
 
-Four preset slots appear as extra entries in adjustor's **existing** TDP
-dropdown, beside Silent / Balanced / Performance / Custom:
+Presets are **user-created value sets**, applied through adjustor's own Custom
+mode. Add and remove them from the QAM; the list is not fixed.
 
 ```
-TDP Mode  [ Custom · On Battery  ▾ ]
-            Silent
-            Balanced
-            Performance
-            Custom
-            Custom · Plugged In
-            Custom · On Battery      ← ours
-            Custom · Gaming
-            Custom · Alternate
-   TDP     [=====      ] 20 W
-   TDP Boost [x]
-
-Preset on Power Change  [ Enabled ▾ ]
-   On AC       [ Custom · Plugged In ▾ ]
-   On Battery  [ Custom · On Battery ▾ ]
+Asus TDP
+├─ TDP Mode  [ Custom  ▾ ]        ← adjustor's own, unmodified
+│    TDP        [====   ] 9 W     ← written by the active preset
+│    TDP Boost  [x]
+├─ Custom Presets
+│    Preset      [ Preset 2  ▾ ]
+│       TDP (PL1, sustained)  [===   ] 9 W
+│       TDP Boost             [x]
+│       Power Limits          [ Manual ▾ ]
+│          PL2 (short boost)  [====  ] 12 W
+│          PL3 (fast boost)   [===== ] 15 W
+│    [ Add Preset ]  [ Remove Preset ]
+│    Preset Slots  [ 2 ]
+└─ Preset on Power Change  [ Enabled ▾ ]
+     On AC       [ Preset 1 ▾ ]
+     On Battery  [ Preset 2 ▾ ]
 ```
 
-Each slot carries its own `tdp` (5–65 W) and `boost`. The power-change policy
-is **disabled by default** and **edge-triggered**: it acts on a plug/unplug
-transition and never continuously, so a mode picked by hand afterwards sticks
-until the next transition.
+Each preset carries PL1 (5–65 W), a boost flag, and an **auto/manual gate for
+PL2/PL3**. Auto lets adjustor derive them; Manual states all three outright,
+which is the only way to get a meaningful split at or above 35 W (see §6).
 
-**hhd-z13 writes no PPT registers at all.** That is the design, not an
-omission — see §3.
+The power-change policy is **disabled by default** and **edge-triggered**: it
+acts on a plug/unplug transition and never continuously, so a change made by
+hand afterwards stays. Its targets are the presets *plus* adjustor's three
+stock profiles, so "on battery, just use Silent" is expressible without
+burning a slot.
 
----
+**hhd-z13 writes no PPT registers at all.** That is the design — see §3.
 
 ## 2. Two corrections that reshaped this
 
@@ -74,57 +77,65 @@ Read live over hhd's API, `tdp.asus` exists with all four stock modes and a
 
 ---
 
-## 3. Why adjustor does the writing
+## 3. Why adjustor does the writing, and why presets are data
 
 adjustor already has a correct writer for this machine: the right floor (§4),
 the right interface (§5), the ordering, the debounce, the thermal-profile
 selection, and the KDE power-profile report derived from wattage. What it
-lacked was more than one custom slot.
+lacked was more than one Custom slot.
 
-So hhd-z13 adds slots and nothing else:
+So selecting a preset writes `tdp.asus.tdp_v2.custom.tdp` / `.custom.boost`
+and sets the mode to `custom` — the identical path a user takes by hand.
 
-1. **Contribute modes.** hhd's `merge_reduce` unions a `mode`'s `modes` dict
-   exactly as it unions a container's `children`, so extra dropdown entries
-   are a merge, not a patch.
-2. **Patch adjustor to reach them** (§6).
-3. **Mirror** the selected slot's `tdp`/`boost` into
-   `tdp.asus.tdp_v2.custom.tdp` / `.custom.boost` — the two keys adjustor's
-   custom branch already reads.
+### The KDE problem, and why this shape solves it
 
-A second PPT writer inside hhd would have rebuilt, in-process, the exact
-multi-writer ambiguity this release exists to end.
+The first implementation made presets extra **modes** in adjustor's dropdown.
+It worked, then lost to KDE. Unplugging makes KDE change its power profile;
+that reaches adjustor as a `ppd` event, which its `notify()` maps onto a stock
+mode and its `update()` force-writes over the config:
 
-### The merge contract
+```python
+new_mode = self.new_mode
+...
+elif new_mode:
+    mode = new_mode
+    conf["tdp.asus.tdp_v2.mode"] = mode
+```
 
-The contribution **omits `title`, `default` and `tags`.** `pick_tag` resolves
-as `b.get(tag, a.get(tag, default))` and plugins merge in ascending priority
-order, so adjustor (6) is `a` and hhd-z13 (11) is `b`. Supplying any of them
-would overwrite adjustor's "TDP Mode" title and its `default: balanced`.
+It writes the value captured in `notify()` rather than reading the config, so
+a preset mode was simply replaced. Observed live: unplugging selected Silent
+instead of the battery preset, three seconds after the switch.
 
-`type` is the one key that is **required**, at both levels. `merge_reduce`
-only unions when `b["type"] == a["type"]`; get it wrong and the contribution
-is silently dropped rather than raising.
+**Stock Custom has always survived this — and not by avoiding it.** The mode
+still flips to `quiet` and the label still reads Silent. But the quiet branch
+writes only `throttle_thermal_policy` and never touches PPT, so nothing
+overwrites the registers and the wattage stays exactly where Custom put it.
 
-### Why the mirror runs in `prepare()`
+Applying presets through Custom inherits that tolerance for free. It also
+deleted two patch anchors: adjustor's mode dispatch needs no widening at all.
+
+The corollary is a rule the code states explicitly: **the mode is asserted
+only when a preset is applied, never re-asserted afterwards.** Fighting KDE
+for the label would be an endless loop for no gain, since the limit is already
+correct.
+
+### Why `prepare()`
 
 hhd runs `prepare()` for every plugin immediately before the update loop, in
-**descending** priority order (`run_plugin_cmd(..., reverse=True)`), while
-`update()` runs ascending. adjustor's driver is priority 6 and implements no
-`prepare()`, so priority 11 gets a clean write window in the *same tick*.
+**descending** priority order, while `update()` runs ascending. adjustor's
+driver is priority 6 and implements no `prepare()`, so priority 11 gets a
+clean write window in the *same tick*. From `update()` the write would be one
+poll interval late (2 s) and adjustor would arm its debounce against the
+previous preset's wattage.
 
-From `update()` the write would land after adjustor had already read: one poll
-interval late (`POLL_DELAY` is 2 s), and on a mode switch adjustor would arm
-its debounce against the *previous* slot's wattage.
+### Why the list can change at runtime
 
-### Why the mirror is change-gated
-
-adjustor writes `custom.tdp` back when its own clamp fires. Rewriting
-unconditionally would undo that every tick while it rewrote every tick — the
-CPU's power limits flapping. The mirror is gated on the tuple
-`(mode, watts, boost)`, and the slot sliders are declared over adjustor's
-*exact* enforced range (5–65 W) so its clamp never fires in the first place.
-
----
+hhd fixes a mode's entries when `settings()` runs, so a dynamic list is only
+possible by asking hhd to rebuild the tree — emitting `{"type": "settings"}`,
+exactly as adjustor does when its own options change. The count is persisted
+as an ordinary setting, read back in `update()`, and a disagreement with what
+was last generated triggers exactly one rebuild. Add seeds the new slot from
+the active one, so a new preset starts from something useful.
 
 ## 4. The floor is 5 W, not 28
 
@@ -200,22 +211,40 @@ so the divergence is visible rather than surprising.
 
 `hhd-patches/hhd-qam-toggle-patch.py`, mark `z13-tdp-presets`. A **new** mark,
 not `z13-cpu-disable-native`: that one means "adjustor stops writing this
-because hhd-z13 owns it", and this is the exact opposite.
+because hhd-z13 owns it", and this is the opposite.
 
-Four `"replace"` entries, all anchors verified unique:
+Three `"replace"` entries:
 
 | label | effect |
 |---|---|
-| `preset-fallthrough` | `mode != "custom"` → `mode in ("quiet","balanced","performance")` |
-| `preset-apply` | `mode == "custom"` → also any mode outside those three |
+| `ppt-override` | write explicit PL2/PL3 when a preset supplies them |
 | `wakeup-clock` | `time.time()` → `time.perf_counter()` |
 | `acdc-clock` | `time.time()` → `time.perf_counter()` |
 
-Entry 1 is needed because adjustor's dispatch ends in `case _:` meaning
-*performance* — an unrecognised mode would set the Turbo thermal profile and
-write no power limit. Both preset entries are phrased as "not one of the three
-modes upstream handles", so adjustor never learns our mode names and behaviour
-is identical with no presets installed.
+### Why `ppt-override` exists
+
+Upstream derives the short and fast limits from the sustained value:
+
+```python
+set_tdp("fast", FTDP_FN, min(max(steady, MAX_TDP_BOOST), int(steady * FPPT_BOOST)))
+```
+
+`MAX_TDP_BOOST` is 35, an ROG Ally constant carrying upstream's own
+`# TODO: Make per device`. So at 35 W and above, `min(max(steady, 35), …)`
+collapses to `steady` and all three limits become the same number — the boost
+toggle does nothing. A preset set to Manual publishes all three on two config
+keys, and both being non-zero is what selects them. The stock Custom mode
+never writes those keys, so its behaviour is untouched.
+
+Ordering is enforced by the producer (`PL1 ≤ PL2 ≤ PL3`), because the firmware
+**rejects** a lower tier that exceeds a higher one rather than clamping it — a
+nonsensical order would otherwise silently apply nothing.
+
+**Two entries were removed** when presets became data. An installed adjustor
+can still carry them: the patcher only adds what the *current* table names and
+never removes what an older one applied. Harmless — with no preset modes the
+widened guard can never match — but `system/v040-acceptance.sh` reports it, and
+`hhd-patches/install.sh --revert` followed by a re-apply clears it.
 
 ### The clock bug (entries 3–4)
 
@@ -275,12 +304,13 @@ either way.
   the spec has exactly three. Each preset maps to the closest, derived by
   adjustor from wattage (`<42` power-saver, `<50` balanced, else performance).
   Deriving is what was asked for: "show up on KDE as the closest preset".
-- **Per-slot sPPT/fPPT.** adjustor derives them from the sustained value and
-  the boost flag. Exposing them would mean bypassing its writer.
-- **Live wattage in the mode titles.** Titles are static YAML, so
-  "Quiet 15 W" becomes a lie the moment that slot is edited. Role names stay
-  true. Rendering live values needs a settings regeneration per slider drag —
-  a new failure class for a cosmetic win.
+- **Renaming presets.** Slots are "Preset 1..N". A free-text name would need a
+  `custom` setting type and a settings regeneration per keystroke; the count
+  is user-controlled, which was the actual ask.
+- **Live wattage in the preset titles.** Titles are fixed when `settings()`
+  runs, so "Preset 2 — 15 W" becomes a lie the moment that slot is edited.
+  Keeping them live means a tree rebuild per slider drag — a new failure class
+  for a cosmetic win.
 - **Reaching `max_tdp_oc` (90 W).** Slots stay 5–65 to match adjustor's
   enforced range exactly. 90 W remains available through stock Custom with
   *Enforce Device TDP Limits* off.

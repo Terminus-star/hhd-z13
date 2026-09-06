@@ -2,10 +2,9 @@
 
 Run: python3 tests/test_tdp_presets.py   (no root, no writes, no hardware)
 
-The plugin writes no hardware by design -- it only sets config keys that
-adjustor reads -- so everything here is exercised against a real Config and a
-real merge against adjustor's OWN settings.yml. _on_ac is stubbed; nothing
-else needs to be.
+The plugin writes no hardware by design -- it only sets config keys adjustor
+reads -- so everything is exercised against a real Config and a real merge
+against adjustor's OWN settings.yml. _on_ac is stubbed; nothing else is.
 """
 
 import glob
@@ -32,70 +31,33 @@ def ok(cond, msg, detail=""):
         fail += 1
 
 
-def plugin(ready=True):
+def plugin(ready=True, count=2):
     p = t.Z13TdpPlugin()
     p._tdp_ready = ready
+    p._count = count
+    p.events = []
+    p.emit = p.events.append
     return p
 
 
-# ==========================================================================
-# 1. Merge into adjustor's own dropdown
-# ==========================================================================
-hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/drivers/asus/settings.yml"))
-if not hits:
-    print("  SKIP  adjustor not installed")
-    sys.exit(0)
-
-base = {"tdp": {"asus": yaml.safe_load(open(hits[-1]))}}
-m = merge_settings([base, plugin().settings()])
-asus = m["tdp"]["asus"]
-tv = asus["children"]["tdp_v2"]
-
-ok(asus.get("title") == "Asus TDP",
-   f"adjustor's container title survives ({asus.get('title')!r})")
-ok(tv.get("default") == "balanced",
-   f"adjustor's default mode survives ({tv.get('default')!r})")
-ok(tv.get("type") == "mode", f"tdp_v2 is still a mode ({tv.get('type')!r})")
-
-for stock in ("quiet", "balanced", "performance", "custom"):
-    ok(stock in tv["modes"], f"adjustor's {stock!r} mode is still there")
-for preset in t.PRESET_MODES:
-    ok(preset in tv["modes"], f"our {preset!r} mode was added")
-
-ok(len(tv["modes"]) == 8, f"eight modes in one dropdown ({sorted(tv['modes'])})")
-
-# The mirror targets must still exist, or there is nothing to write into.
-cust = tv["modes"]["custom"]["children"]
-ok("tdp" in cust and "boost" in cust,
-   f"adjustor's custom children intact ({sorted(cust)})")
-
-ok("z13_tdp_auto" in asus["children"], "the power policy control merged in")
-ok("z13_tdp_status" in asus["children"], "the status field merged in")
-ok("fan" in asus["children"], "adjustor's own fan curve survives")
-
-# Slot ranges must match adjustor's enforced range EXACTLY, or its clamp
-# fires, writes custom.tdp back, and the mirror fights it.
-for preset in t.PRESET_MODES:
-    s = tv["modes"][preset]["children"]["tdp"]
-    ok(s["min"] == t.MIN_TDP and s["max"] == t.MAX_TDP,
-       f"{preset!r} slider is {t.MIN_TDP}..{t.MAX_TDP} W",
-       f"(got {s['min']}..{s['max']})")
-
-# Not ready -> absent entirely, rather than an orphan section.
-ok(plugin(ready=False).settings() == {}, "contributes nothing until TDP is enabled")
-
-
-# ==========================================================================
-# 2. The mirror
-# ==========================================================================
-def mkconf(mode="balanced", auto="disabled", ac="z13_ac", dc="z13_dc"):
-    presets = {
-        p: {"tdp": d, "boost": True}
-        for p, d in zip(t.PRESET_MODES, (45, 20, 60, 45))
+def slot(w=45, boost=True, ppt="auto", sppt=45, fppt=45):
+    return {
+        "tdp": w, "boost": boost,
+        "ppt": {"mode": ppt, "manual": {"sppt": sppt, "fppt": fppt}},
     }
+
+
+def mkconf(mode="balanced", auto="disabled", ac="p1", dc="p2", active="p1",
+           count=2, slots=None):
+    slots = slots or {"p1": slot(45), "p2": slot(20)}
     return Config({
         "tdp": {"asus": {
-            "tdp_v2": {"mode": mode, "custom": {"tdp": 45, "boost": True}, **presets},
+            "tdp_v2": {"mode": mode, "custom": {"tdp": 45, "boost": True}},
+            "z13_presets": {
+                "active": {"mode": active, **slots},
+                "count": count, "add": False, "remove": False,
+                "sppt": 0, "fppt": 0,
+            },
             "z13_tdp_auto": {
                 "mode": auto,
                 "enabled": {"ac_preset": ac, "dc_preset": dc},
@@ -106,195 +68,216 @@ def mkconf(mode="balanced", auto="disabled", ac="z13_ac", dc="z13_dc"):
     })
 
 
-p = plugin()
-c = mkconf(mode="balanced")
-p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == 45, "a stock mode is left entirely alone")
-ok(p.old_mirror is None, "no baseline is held while off a preset")
+# ==========================================================================
+# 1. The generated tree
+# ==========================================================================
+s = plugin(count=3).settings()
+node = s["tdp"]["asus"]["children"]["z13_presets"]
+modes = node["children"]["active"]["modes"]
+ok(sorted(modes) == ["p1", "p2", "p3"], f"count drives the slot list ({sorted(modes)})")
+ok(modes["p2"]["title"] == "Preset 2", f"slots are titled ({modes['p2']['title']!r})")
 
-c = mkconf(mode="z13_dc")
-p = plugin()
-p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == 20,
-   f"selecting a preset mirrors its watts ({c[t.CUSTOM_TDP].to(int)})")
-ok(c[t.CUSTOM_BOOST].to(bool) is True, "and its boost flag")
+# deepcopy per slot, not a YAML alias: the tree is walked and annotated in
+# several places, so shared dict objects would be a latent aliasing bug.
+modes["p1"]["children"]["tdp"]["default"] = 999
+ok(modes["p2"]["children"]["tdp"]["default"] != 999,
+   "slots are independent objects, not aliases")
 
-# The oscillation guard. adjustor writes custom.tdp back when its clamp
-# fires; if we rewrote unconditionally the two would ping-pong every tick and
-# the CPU's power limits would flap.
-c[t.CUSTOM_TDP] = 33
-p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == 33,
-   f"an unchanged preset does NOT rewrite over adjustor ({c[t.CUSTOM_TDP].to(int)})")
+pt = modes["p1"]["children"]
+ok(pt["tdp"]["min"] == t.MIN_TDP and pt["tdp"]["max"] == t.MAX_TDP,
+   f"PL1 spans adjustor's enforced range ({pt['tdp']['min']}..{pt['tdp']['max']})")
+ok(sorted(pt["ppt"]["modes"]) == ["auto", "manual"], "PL2/PL3 have an auto/manual gate")
+ok(sorted(pt["ppt"]["modes"]["manual"]["children"]) == ["fppt", "sppt"],
+   "manual exposes PL2 and PL3")
 
-# But a real edit to the slot must land.
-c["tdp.asus.tdp_v2.z13_dc.tdp"] = 9
-p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == 9, f"editing the slot re-mirrors ({c[t.CUSTOM_TDP].to(int)})")
+opts = s["tdp"]["asus"]["children"]["z13_tdp_auto"]["modes"]["enabled"]["children"]["ac_preset"]["options"]
+ok(sorted(opts) == ["balanced", "p1", "p2", "p3", "performance", "quiet"],
+   f"power-change targets are presets + stock profiles ({sorted(opts)})")
+# adjustor's keys and titles disagree; using its titles avoids two different
+# meanings of "Performance" in one list.
+ok(opts["balanced"] == "Performance" and opts["performance"] == "Turbo"
+   and opts["quiet"] == "Silent",
+   f"stock profiles use adjustor's own labels ({[opts[k] for k in t.STOCK_MODES]})")
 
-# Leaving and returning to the SAME preset must re-apply, so the baseline has
-# to be dropped on the way out.
-c[t.MODE_PATH] = "balanced"
-p.prepare(c)
-c[t.CUSTOM_TDP] = 45
-c[t.MODE_PATH] = "z13_dc"
-p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == 9, "returning to the same preset re-applies it")
+ok(plugin(ready=False).settings() == {}, "contributes nothing until TDP is enabled")
 
-# Out-of-range slots are clamped by us too, so adjustor's clamp never fires.
-c["tdp.asus.tdp_v2.z13_dc.tdp"] = 900
-p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == t.MAX_TDP,
-   f"an over-range slot is clamped to {t.MAX_TDP} ({c[t.CUSTOM_TDP].to(int)})")
+# --- merge against adjustor's real tree -----------------------------------
+hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/drivers/asus/settings.yml"))
+if hits:
+    base = {"tdp": {"asus": yaml.safe_load(open(hits[-1]))}}
+    m = merge_settings([base, plugin().settings()])
+    asus = m["tdp"]["asus"]
+    ok(asus.get("title") == "Asus TDP", "adjustor's container title survives")
+    tv = asus["children"]["tdp_v2"]
+    ok(sorted(tv["modes"]) == ["balanced", "custom", "performance", "quiet"],
+       f"adjustor's dropdown is UNTOUCHED -- no preset modes ({sorted(tv['modes'])})")
+    ok("tdp" in tv["modes"]["custom"]["children"], "the mirror target still exists")
+    ok("fan" in asus["children"], "adjustor's fan curve survives")
+    ok("z13_presets" in asus["children"], "our preset container merged in")
+else:
+    print("  SKIP  adjustor not installed (merge checks)")
 
 
 # ==========================================================================
-# 3. Auto-switch: edge-triggered, first tick adopts, holds the transition
+# 2. Applying a preset
+# ==========================================================================
+p = plugin()
+c = mkconf(active="p1")
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced",
+   "first tick adopts and applies nothing (hhd starting must not change TDP)")
+
+c["tdp.asus.z13_presets.active.p1.tdp"] = 9
+p.prepare(c)
+ok(c[t.CUSTOM_TDP].to(int) == 9, f"editing a preset applies it ({c[t.CUSTOM_TDP].to(int)})")
+ok(c[t.MODE_PATH].to(str) == "custom", "and selects adjustor's Custom mode")
+ok(c[t.SPPT].to(int) == 0 and c[t.FPPT].to(int) == 0,
+   "PL2/PL3 left derived while the preset is on Auto")
+
+# THE KDE TOLERANCE. adjustor's ppd handler force-writes a stock mode over the
+# config on every power transition. Stock Custom survives that because the
+# quiet branch writes only a fan curve and never touches PPT -- the wattage
+# stays. We must inherit that by NOT fighting for the label; re-asserting
+# would be an endless loop against KDE for no gain.
+c[t.MODE_PATH] = "quiet"
+p.prepare(c)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "quiet",
+   f"the mode is never re-asserted once applied ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, "and the applied wattage is untouched")
+
+# --- manual PL2/PL3 -------------------------------------------------------
+p = plugin()
+c = mkconf(active="p1", slots={"p1": slot(30, ppt="manual", sppt=50, fppt=70),
+                               "p2": slot(20)})
+p.prepare(c)
+c["tdp.asus.z13_presets.active.p1.tdp"] = 31
+p.prepare(c)
+ok((c[t.SPPT].to(int), c[t.FPPT].to(int)) == (50, 70),
+   f"manual limits are published verbatim ({c[t.SPPT].to(int)}, {c[t.FPPT].to(int)})")
+
+# The firmware REJECTS a lower tier exceeding a higher one rather than
+# clamping, so a nonsensical order would silently apply nothing.
+p = plugin()
+c = mkconf(active="p1", slots={"p1": slot(60, ppt="manual", sppt=10, fppt=5),
+                               "p2": slot(20)})
+p.prepare(c)
+c["tdp.asus.z13_presets.active.p1.tdp"] = 61
+p.prepare(c)
+w, sp, fp = c[t.CUSTOM_TDP].to(int), c[t.SPPT].to(int), c[t.FPPT].to(int)
+ok(w <= sp <= fp, f"PL1 <= PL2 <= PL3 is enforced before writing ({w}, {sp}, {fp})")
+
+
+# ==========================================================================
+# 3. Auto-switch
 # ==========================================================================
 def with_ac(val):
     t._on_ac = lambda: val
 
 
-class _Clock:
-    """Controllable monotonic clock, so the hold window is testable without
-    sleeping through it."""
-    now = 1000.0
-
-    def monotonic(self):
-        return self.now
-
-
-clock = _Clock()
-t.time = clock  # tdp.py uses time.monotonic() and nothing else
-
-
 p = plugin()
-c = mkconf(mode="z13_game", auto="enabled")
+c = mkconf(auto="enabled", ac="p1", dc="p2", active="p1")
 with_ac(True)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_game",
-   f"first tick adopts the power source and moves nothing ({c[t.MODE_PATH].to(str)})")
-
-clock.now += 60
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_game", "no transition, no change")
+ok(c[t.MODE_PATH].to(str) == "balanced", "first tick adopts the power source only")
 
 with_ac(False)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_dc",
-   f"unplugging switches to the battery preset ({c[t.MODE_PATH].to(str)})")
-ok(c[t.CUSTOM_TDP].to(int) == 20, "and its watts are mirrored in the same tick")
+ok(c["tdp.asus.z13_presets.active.mode"].to(str) == "p2",
+   f"unplugging selects the battery preset ({c[t.ACTIVE].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 20, f"and applies it ({c[t.CUSTOM_TDP].to(int)})")
+ok(c[t.MODE_PATH].to(str) == "custom", "and selects Custom")
 
-# THE REGRESSION. Observed live: unplug at 19:27:39 selected z13_dc, then at
-# 19:27:42 KDE's power-profile change arrived as a "ppd" event, adjustor's
-# notify() mapped it to quiet, and its update() force-wrote that over the
-# config -- so unplugging landed on Silent. Being edge-triggered, nothing
-# fired again.
-c[t.MODE_PATH] = "quiet"          # what adjustor's ppd handler does to us
-clock.now += 3                    # the measured 3s delay
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_dc",
-   f"a ppd event during the transition is overridden ({c[t.MODE_PATH].to(str)})")
-ok(c[t.CUSTOM_TDP].to(int) == 20, "and the preset's watts are restored with it")
-
-# ... but only for the window. A choice made later is a real choice.
-clock.now += t.HOLD_S + 1
+# The transition must re-assert even when the VALUES are unchanged, because
+# the mode may have been moved off custom in between.
 c[t.MODE_PATH] = "quiet"
-p.prepare(c)
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "quiet",
-   f"after the window, a hand-picked mode sticks ({c[t.MODE_PATH].to(str)})")
-
 with_ac(True)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_ac", "the next transition does take over again")
-
-# The hold arms even when the mode is ALREADY the target -- the overwrite
-# arrives seconds later, so arming only on a change would leave the common
-# case (unplug while already on the battery preset) unprotected.
-clock.now += 60
 with_ac(False)
-c[t.MODE_PATH] = "z13_dc"
 p.prepare(c)
-c[t.MODE_PATH] = "quiet"
-clock.now += 2
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_dc",
-   f"the hold arms even with no mode change to make ({c[t.MODE_PATH].to(str)})")
+ok(c[t.MODE_PATH].to(str) == "custom",
+   "a transition re-asserts Custom even with identical values")
 
-# Unreadable power source must never guess.
-clock.now += 60
-c[t.MODE_PATH] = "z13_game"
+# A stock profile is a legitimate target.
+p = plugin()
+c = mkconf(auto="enabled", ac="quiet", dc="performance", active="p1")
+with_ac(True)
+p.prepare(c)
+with_ac(False)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "performance",
+   f"a stock profile can be the battery target ({c[t.MODE_PATH].to(str)})")
+
 with_ac(None)
+before = c[t.MODE_PATH].to(str)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_game", "an unreadable charger changes nothing")
+ok(c[t.MODE_PATH].to(str) == before, "an unreadable charger changes nothing")
 
-# Stock firmware profiles are legitimate targets.
-clock.now += 60
-with_ac(True)
-c3 = mkconf(mode="z13_game", auto="enabled", ac="quiet", dc="performance")
-p3 = plugin()
-p3.prepare(c3)
-before = c3[t.CUSTOM_TDP].to(int)   # whatever the previous preset left there
-with_ac(False)
-p3.prepare(c3)
-ok(c3[t.MODE_PATH].to(str) == "performance",
-   f"a stock profile can be the battery target ({c3[t.MODE_PATH].to(str)})")
-# Switching to a firmware profile must not touch custom.tdp: adjustor owns
-# those modes outright and writes only a fan curve for them.
-ok(c3[t.CUSTOM_TDP].to(int) == before,
-   f"selecting a stock profile mirrors nothing ({before} -> {c3[t.CUSTOM_TDP].to(int)})")
-clock.now += 60
-with_ac(True)
-p3.prepare(c3)
-ok(c3[t.MODE_PATH].to(str) == "quiet",
-   f"and the AC target too ({c3[t.MODE_PATH].to(str)})")
-
-for m in t.STOCK_MODES:
-    ok(m in t.SELECTABLE_MODES, f"{m!r} is selectable as a power-change target")
-
-# Disabled policy re-arms, so turning it back on adopts rather than firing a
-# stale edge from before it was switched off.
-clock.now += 60
-with_ac(True)
-c2 = mkconf(mode="z13_game", auto="disabled")
 p2 = plugin()
+c2 = mkconf(auto="disabled", active="p1")
+with_ac(True)
 p2.prepare(c2)
 ok(p2.old_ac is None, "a disabled policy holds no edge state")
-ok(p2._hold is None, "and holds nothing")
-with_ac(False)
-p2.prepare(c2)
-ok(c2[t.MODE_PATH].to(str) == "z13_game", "a disabled policy never switches")
 
 
 # ==========================================================================
-# 4. The missing-patch banner
+# 4. Add / remove
 # ==========================================================================
-p = plugin()
-c = mkconf()
-t._adjustor_is_patched = lambda: False
-p._patched = None
+p = plugin(count=2)
+c = mkconf(count=2, active="p1", slots={"p1": slot(9), "p2": slot(20)})
+c[t.ADD] = True
 p.update(c)
-ok(c[t.STATUS_PATH].to(str) == t.PATCH_WARNING,
-   "an unpatched adjustor is reported, not failed silently")
+ok(c[t.COUNT].to(int) == 3, f"Add grows the list ({c[t.COUNT].to(int)})")
+ok(any(e.get("type") == "settings" for e in p.events),
+   "and asks hhd to rebuild the tree (the list is fixed at settings() time)")
+ok(c["tdp.asus.z13_presets.active.p3.tdp"].to(int) == 9,
+   "a new slot is seeded from the active one, not from a default nobody chose")
 
-p = plugin()
-c = mkconf()
-t._adjustor_is_patched = lambda: True
-p._patched = None
+p = plugin(count=2)
+c = mkconf(count=2, active="p2")
+c[t.REMOVE] = True
 p.update(c)
-ok(c[t.STATUS_PATH].to(str) == "", "a patched adjustor shows nothing")
+ok(c[t.COUNT].to(int) == 1, f"Remove shrinks the list ({c[t.COUNT].to(int)})")
+ok(c[t.ACTIVE].to(str) == "p1",
+   f"removing the SELECTED slot steps the selection back ({c[t.ACTIVE].to(str)})")
 
-# Undeterminable must not claim a fault -- failing this check open is worse
-# than a false banner only when we KNOW it is unpatched.
-p = plugin()
-c = mkconf()
-t._adjustor_is_patched = lambda: None
-p._patched = None
+p = plugin(count=1)
+c = mkconf(count=1, active="p1", slots={"p1": slot(9)})
+c[t.REMOVE] = True
 p.update(c)
-ok(c[t.STATUS_PATH].to(str) == "", "an unanswerable check makes no claim")
+ok(c[t.COUNT].to(int) == 1, "the last preset cannot be removed")
 
-# prepare() must never raise out, whatever the config looks like.
+p = plugin(count=t.MAX_PRESETS)
+c = mkconf(count=t.MAX_PRESETS, active="p1")
+c[t.ADD] = True
+p.update(c)
+ok(c[t.COUNT].to(int) == t.MAX_PRESETS, f"capped at {t.MAX_PRESETS}")
+
+# An externally edited count (or one restored from state.yml at startup) must
+# rebuild exactly once, not every tick.
+p = plugin(count=2)
+c = mkconf(count=5)
+p.update(c)
+ok(p._count == 5, f"the stored count is adopted ({p._count})")
+n = len([e for e in p.events if e.get("type") == "settings"])
+p.update(c)
+ok(len([e for e in p.events if e.get("type") == "settings"]) == n,
+   "and rebuilds once, not on every tick")
+
+
+# ==========================================================================
+# 5. The missing-patch banner
+# ==========================================================================
+for state, expect in ((False, t.PATCH_WARNING), (True, ""), (None, "")):
+    p = plugin()
+    c = mkconf()
+    t._adjustor_is_patched = lambda: state
+    p._patched = None
+    p.update(c)
+    label = {False: "unpatched is reported", True: "patched shows nothing",
+             None: "unanswerable makes no claim"}[state]
+    ok(c[t.STATUS].to(str) == expect, label)
+
 p = plugin()
 try:
     p.prepare(Config({}))

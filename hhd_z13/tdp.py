@@ -1,54 +1,57 @@
-"""Extra TDP preset slots, added to adjustor's own dropdown.
+"""User-created TDP presets, applied through adjustor's own Custom mode.
 
-WHY THIS WRITES NO HARDWARE
-    adjustor already has a correct PPT writer for this machine: the right
-    floor (5 W, from its own Z1_DATA, not asus-armoury's advertised 28), the
-    right interface (asus-nb-wmi), the right ordering and debounce, the
-    thermal-profile selection, and the KDE power-profile report derived from
-    the wattage. What it lacks is more than ONE custom slot.
+WHY PRESETS ARE DATA, NOT MODES
+    The first version of this added preset MODES to adjustor's TDP dropdown.
+    It worked, and then lost to KDE. Unplugging makes KDE change its power
+    profile; that reaches adjustor as a "ppd" event, which its notify() maps
+    onto a stock mode and its update() FORCE-writes over the config:
 
-    So this plugin adds slots and nothing else. It contributes extra modes
-    into adjustor's tdp.asus.tdp_v2 dropdown and, when one is selected,
-    mirrors that slot's watts into the two config keys adjustor's custom mode
-    already reads. adjustor does every write.
+        new_mode = self.new_mode
+        ...
+        elif new_mode:
+            mode = new_mode
+            conf["tdp.asus.tdp_v2.mode"] = mode
 
-    That is the point. v0.4.0 exists to hand TDP ownership BACK to adjustor as
-    z13ctl-plus is phased out -- growing a second PPT writer here would have
-    recreated, inside hhd, exactly the multi-writer ambiguity the release is
-    meant to end.
+    It writes the value captured in notify() rather than reading the config,
+    so a preset mode was simply replaced -- observed live as "unplugging
+    selects Silent instead of the battery preset".
+
+    Adjustor's stock Custom mode has always survived this, and the reason is
+    worth stating: it does NOT avoid the overwrite. The mode still flips to
+    quiet and the label still reads Silent. But the quiet branch writes only
+    throttle_thermal_policy and never touches PPT, so nothing overwrites the
+    registers and the wattage stays exactly where Custom put it.
+
+    So a preset is now a stored value set. Selecting one writes adjustor's own
+    custom.tdp / custom.boost and selects Custom -- the identical path a user
+    takes by hand -- and inherits that tolerance for free. It also removed two
+    patch anchors: adjustor's mode dispatch no longer needs widening at all.
 
 WHY prepare() AND NOT update()
-    hhd runs prepare() for every plugin immediately before the update loop,
-    and it runs it in DESCENDING priority order (run_plugin_cmd(...,
-    reverse=True)) while update() runs ascending. adjustor's ASUS driver is
-    priority 6 and implements no prepare() at all, so anything above 6 gets a
-    clean write window in the SAME tick, before adjustor reads.
+    hhd runs prepare() for every plugin immediately before the update loop, in
+    DESCENDING priority order, while update() runs ascending. adjustor's
+    driver is priority 6 and implements no prepare(), so anything above 6 gets
+    a clean write window in the same tick, before adjustor reads. From
+    update() the write would be a poll interval late (2s) and adjustor would
+    arm its debounce against the previous preset's wattage.
 
-    Mirroring from update() instead would land after adjustor had already
-    read, so the value would be one poll interval late -- POLL_DELAY is 2s --
-    and on a mode switch adjustor would arm its debounce against the PREVIOUS
-    slot's wattage before seeing the new one.
+WHY THE PRESET LIST CAN CHANGE AT RUNTIME
+    hhd fixes a mode's entries when settings() runs, so a dynamic list is only
+    possible by asking hhd to rebuild the tree -- emit {"type": "settings"}.
+    The count is persisted as an ordinary setting, read back in update(), and
+    a disagreement with what was last generated triggers exactly one rebuild.
 
-WHY THE MIRROR IS CHANGE-GATED
-    adjustor writes custom.tdp back when its own clamp fires. If we rewrote
-    the key unconditionally we would undo that every tick and it would rewrite
-    it every tick: the one oscillation this design admits. The slot sliders
-    are also declared over adjustor's exact enforced range, so its clamp has
-    nothing to clamp in the first place. Belt and braces, because a stuck
-    apply loop here means the CPU's power limits flapping.
-
-REQUIRES THE ADJUSTOR PATCH
-    adjustor gates every PPT write on `mode == "custom"`, and its preset
-    dispatch ends in `case _:` meaning performance -- so without
-    hhd-patches' z13-tdp-presets table a preset would set the Turbo thermal
-    profile and write nothing. That is invisible from the UI, so update()
-    checks for the patch and says so in a status field rather than failing
-    quietly.
+PL2/PL3
+    Upstream derives the short and fast limits from the sustained value using
+    MAX_TDP_BOOST = 35, an ROG Ally constant, so they collapse to the same
+    number at or above 35 W. A preset set to Manual publishes all three on two
+    config keys that the z13-tdp-presets patch reads. Both zero means derive,
+    which is what the stock Custom mode always gets.
 """
 
 import glob
 import logging
-import time
+from copy import deepcopy
 
 from hhd.plugins import HHDPlugin, load_relative_yaml
 from hhd.plugins.conf import Config
@@ -57,73 +60,60 @@ from .plugin import _on_ac
 
 logger = logging.getLogger(__name__)
 
-# The mode keys we contribute. Order is the dropdown order.
-PRESET_MODES = ("z13_ac", "z13_dc", "z13_game", "z13_alt")
+MIN_PRESETS = 1
+MAX_PRESETS = 8
+DEFAULT_PRESETS = 2
 
-# The three modes adjustor itself handles. Anything else reaches its custom
-# apply path once patched. Kept here so the guard below reads the same way the
-# patch does.
+# adjustor's three stock profiles. LABELS ARE ADJUSTOR'S, NOT ITS KEYS, which
+# do not agree: `balanced` is displayed "Performance" and `performance` is
+# displayed "Turbo", following Armoury Crate. Naming them by key would put two
+# different meanings of "Performance" in one dropdown.
 STOCK_MODES = ("quiet", "balanced", "performance")
+STOCK_LABELS = {"quiet": "Silent", "balanced": "Performance", "performance": "Turbo"}
 
-# What the power-change policy may select. The stock firmware profiles are
-# included deliberately: "on battery, just use Silent" is a legitimate policy,
-# and restricting the dropdown to our own slots would have forced someone who
-# wants it to burn a slot reproducing a profile adjustor already has.
-SELECTABLE_MODES = PRESET_MODES + STOCK_MODES
-
-# How long after a power transition the chosen mode is held against anything
-# that tries to move it.
-#
-# Not belt-and-braces -- this is load-bearing. Unplugging makes KDE switch its
-# power profile, which arrives as a "ppd" event ~3s later (measured on this
-# machine at 19:27:42, three seconds after the 19:27:39 unplug). adjustor's
-# notify() maps that onto quiet/balanced/performance and its update() then
-# FORCE-writes it over the config:
-#
-#     new_mode = self.new_mode
-#     ...
-#     elif new_mode:
-#         mode = new_mode
-#         conf["tdp.asus.tdp_v2.mode"] = mode
-#
-# It writes the value captured in notify() rather than reading the config, so
-# our prepare() write from an earlier tick is simply overwritten -- and being
-# edge-triggered, we had no reason to fire again. The symptom was "unplugging
-# selects Silent instead of the battery preset".
-#
-# The window is what separates the transition's own aftershocks from a genuine
-# later choice by the user, which must still win. 15s covers the observed 3s
-# echo plus adjustor's APPLY_DELAY and the 2s poll interval, with margin.
-HOLD_S = 15.0
-
-# adjustor's Z1_DATA min_tdp/max_tdp for "ROG Flow Z13 GZ302", and what it
-# clamps to while "Enforce Device TDP Limits" is on. Matching it exactly is
-# what keeps its clamp from ever firing against us.
+# adjustor's Z1_DATA min_tdp/max_tdp, and what it clamps to while "Enforce
+# Device TDP Limits" is on. Matching exactly means its clamp never fires, so
+# it never writes custom.tdp back underneath us.
 MIN_TDP = 5
 MAX_TDP = 65
+MAX_SPPT = 92
+MAX_FPPT = 93
 
-# A fragment of the patched guard. Present only in a patched adjustor.
-PATCH_SENTINEL = 'if mode == "custom" or (mode and mode not in'
+BASE = "tdp.asus"
+MODE_PATH = f"{BASE}.tdp_v2.mode"
+CUSTOM_TDP = f"{BASE}.tdp_v2.custom.tdp"
+CUSTOM_BOOST = f"{BASE}.tdp_v2.custom.boost"
+PRESETS = f"{BASE}.z13_presets"
+ACTIVE = f"{PRESETS}.active.mode"
+COUNT = f"{PRESETS}.count"
+ADD = f"{PRESETS}.add"
+REMOVE = f"{PRESETS}.remove"
+SPPT = f"{PRESETS}.sppt"
+FPPT = f"{PRESETS}.fppt"
+AUTO = f"{BASE}.z13_tdp_auto"
+STATUS = f"{BASE}.z13_tdp_status"
+
+PATCH_SENTINEL = '_z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)'
 ADJUSTOR_ASUS_GLOB = "/usr/lib/python3*/site-packages/adjustor/drivers/asus/__init__.py"
-
-MODE_PATH = "tdp.asus.tdp_v2.mode"
-CUSTOM_TDP = "tdp.asus.tdp_v2.custom.tdp"
-CUSTOM_BOOST = "tdp.asus.tdp_v2.custom.boost"
-AUTO_PATH = "tdp.asus.z13_tdp_auto"
-STATUS_PATH = "tdp.asus.z13_tdp_status"
-
 PATCH_WARNING = (
-    "TDP presets need the adjustor patch — run hhd-patches/install.sh"
+    "Manual PL2/PL3 needs the adjustor patch — run hhd-patches/install.sh"
 )
+
+
+def _pid(i: int) -> str:
+    return f"p{i}"
+
+
+def _clamp(v, lo, hi):
+    return min(max(v, lo), hi)
 
 
 def _adjustor_is_patched() -> bool | None:
     """Is the installed adjustor carrying the z13-tdp-presets patch?
 
-    None means the question could not be answered (adjustor not found, file
-    unreadable). Callers treat None as "do not claim either way" -- failing
-    this check OPEN would be worse than a false banner, because an unpatched
-    adjustor silently applies the Turbo thermal profile and no power limit.
+    None means unanswerable (not found, unreadable). Callers make no claim in
+    that case: a false banner is cheaper than a wrong reassurance, but only
+    when we actually know.
     """
     hits = sorted(glob.glob(ADJUSTOR_ASUS_GLOB))
     if not hits:
@@ -140,149 +130,243 @@ class Z13TdpPlugin(HHDPlugin):
         self.name = "z13_tdp"
         # Above adjustor's 6, which is what puts our prepare() ahead of its
         # update(). 11 rather than 10 so we also sit behind the other two
-        # hhd-z13 plugins in the descending prepare order and cannot perturb
-        # them.
+        # hhd-z13 plugins in the descending prepare order.
         self.priority = 11
         self.log = "z13t"
 
-        # Starts False exactly as adjustor's own driver starts disabled, so we
-        # appear on the same settings pass it appears on: AdjustorInitPlugin
-        # (priority 5) flips hhd.settings.tdp_ready and emits a settings event
-        # in the same tick, and our update() at 11 has already run by the time
-        # that regeneration is processed.
+        # False until update() reads it, mirroring adjustor's own driver
+        # starting disabled -- so we appear on the same settings pass it does.
         self._tdp_ready = False
+        self._count = DEFAULT_PRESETS
 
-        # None means "not established yet". Both are first-tick-adopts.
-        self.old_ac = None
-        self.old_mirror = None
-        # (target_mode, monotonic_deadline) while a transition is settling.
-        self._hold = None
+        self.old_ac = None      # None = first tick adopts, never applies
+        self.old_apply = None   # last applied (pid, w, boost, sppt, fppt)
         self._patched = None
         self._warned = False
 
     def open(self, emit, context, *args, **kwargs):
         self.emit = emit
 
+    # ── settings ──────────────────────────────────────────────────────────
     def settings(self):
         if not self._tdp_ready:
-            # Contributing alone would render an "Asus TDP" section holding
-            # only our presets and none of adjustor's modes, whose selections
-            # would do nothing. Better to be absent.
+            # Contributing alone would render an "Asus TDP" section with no
+            # TDP Mode selector for the presets to drive. Better to be absent.
             return {}
+
         sets = load_relative_yaml("./tdp_settings.yml")
+        n = _clamp(self._count, MIN_PRESETS, MAX_PRESETS)
+
+        # deepcopy per slot: a YAML alias would make every preset the same
+        # dict object, and the tree is walked and annotated in several places.
+        modes = {}
+        for i in range(1, n + 1):
+            c = deepcopy(sets["preset_template"])
+            c["title"] = f"Preset {i}"
+            modes[_pid(i)] = c
+
+        node = sets["z13_presets"]
+        node["children"]["active"]["modes"] = modes
+        node["children"]["active"]["default"] = _pid(1)
+        node["children"]["count"]["default"] = n
+
+        # Presets first, then the stock profiles -- the same order they appear
+        # in adjustor's own dropdown reads oddly here, and "my presets, then
+        # the built-ins" is what someone picking a policy is looking for.
+        opts = {_pid(i): f"Preset {i}" for i in range(1, n + 1)}
+        opts.update({k: STOCK_LABELS[k] for k in STOCK_MODES})
+
+        auto = sets["z13_tdp_auto"]
+        ac = auto["modes"]["enabled"]["children"]["ac_preset"]
+        dc = auto["modes"]["enabled"]["children"]["dc_preset"]
+        ac["options"] = dict(opts)
+        dc["options"] = dict(opts)
+        ac["default"] = _pid(1)
+        dc["default"] = _pid(min(2, n))
+
         return {
             "tdp": {
                 "asus": {
-                    # `type` is required at BOTH levels or merge_reduce
-                    # refuses to union and our contribution is silently
-                    # dropped. Title omitted so adjustor's "Asus TDP" and its
-                    # `default: balanced` survive pick_tag.
+                    # `type` required or merge_reduce refuses to union and the
+                    # contribution is silently dropped. Title omitted so
+                    # adjustor's "Asus TDP" survives pick_tag.
                     "type": "container",
                     "children": {
-                        "tdp_v2": {
-                            "type": "mode",
-                            "modes": sets["z13_tdp_presets"]["modes"],
-                        },
-                        "z13_tdp_auto": sets["z13_tdp_auto"],
+                        "z13_presets": node,
+                        "z13_tdp_auto": auto,
                         "z13_tdp_status": sets["z13_tdp_status"],
                     },
                 }
             }
         }
 
+    # ── reading a preset ──────────────────────────────────────────────────
+    def _values(self, conf: Config, pid: str):
+        base = f"{PRESETS}.active.{pid}"
+        watts = _clamp(conf[f"{base}.tdp"].to(int), MIN_TDP, MAX_TDP)
+        boost = conf[f"{base}.boost"].to(bool)
+
+        if conf.get(f"{base}.ppt.mode", "auto") == "manual":
+            sppt = _clamp(conf[f"{base}.ppt.manual.sppt"].to(int), MIN_TDP, MAX_SPPT)
+            fppt = _clamp(conf[f"{base}.ppt.manual.fppt"].to(int), MIN_TDP, MAX_FPPT)
+            # The firmware REJECTS a lower tier that exceeds a higher one
+            # rather than clamping it, so a nonsensical order would silently
+            # apply nothing. Raise rather than reject: the user asked for at
+            # least this much headroom.
+            sppt = max(sppt, watts)
+            fppt = max(fppt, sppt)
+        else:
+            # 0/0 means "derive", which is upstream's behaviour and what the
+            # stock Custom mode always gets.
+            sppt = fppt = 0
+        return watts, boost, sppt, fppt
+
+    def _apply(self, conf: Config, pid, watts, boost, sppt, fppt):
+        conf[CUSTOM_TDP] = watts
+        conf[CUSTOM_BOOST] = boost
+        conf[SPPT] = sppt
+        conf[FPPT] = fppt
+        # Selecting Custom is what makes adjustor act. Note this is asserted
+        # only when a preset is APPLIED -- never re-asserted afterwards. If
+        # KDE flips the label to Silent we leave it, exactly as stock Custom
+        # behaves, because the wattage survives regardless and fighting for
+        # the label would be a loop with no benefit.
+        conf[MODE_PATH] = "custom"
+        logger.info(
+            f"Applied {pid}: PL1={watts}W boost={boost}"
+            + (f" PL2={sppt}W PL3={fppt}W" if sppt else " PL2/PL3 derived")
+        )
+
+    # ── per-tick ──────────────────────────────────────────────────────────
     def prepare(self, conf: Config):
-        # One try/except around everything on purpose. hhd's run_plugin_cmd
-        # REMOVES a plugin that raises, for the rest of the process lifetime --
-        # an unguarded exception here is permanent, not transient.
+        # One try/except around everything: hhd's run_plugin_cmd REMOVES a
+        # plugin that raises, permanently, not just for this tick.
         try:
-            if MODE_PATH not in conf:
-                return  # adjustor's TDP tree is not up yet
-            self._auto_switch(conf)  # may change the mode ...
-            self._mirror(conf)  # ... so mirror after it, same tick
+            if ACTIVE not in conf or MODE_PATH not in conf:
+                return
+            self._auto_switch(conf)
+            self._apply_active(conf)
         except Exception as e:
             logger.warning(f"TDP preset prepare failed: {e}")
 
+    def _apply_active(self, conf: Config):
+        pid = conf[ACTIVE].to(str)
+        if f"{PRESETS}.active.{pid}.tdp" not in conf:
+            return  # mid-rebuild, or a stale selection
+        vals = self._values(conf, pid)
+        sig = (pid, *vals)
+
+        if self.old_apply is None:
+            # First tick adopts. Starting hhd must not change the power limit
+            # by itself; adjustor re-applies custom.tdp on its own at startup.
+            self.old_apply = sig
+            return
+        if sig == self.old_apply:
+            return
+        self.old_apply = sig
+        self._apply(conf, pid, *vals)
+
     def _auto_switch(self, conf: Config):
         """Follow the charger, on the EDGE only."""
-        if f"{AUTO_PATH}.mode" not in conf:
+        if f"{AUTO}.mode" not in conf:
             return
-        if conf[f"{AUTO_PATH}.mode"].to(str) != "enabled":
-            # Re-arm, so turning the policy back on adopts the current power
-            # source rather than firing a stale edge from before it was off.
+        if conf[f"{AUTO}.mode"].to(str) != "enabled":
+            # Re-arm, so turning the policy back on adopts the current source
+            # rather than firing a stale edge from before it was off.
             self.old_ac = None
-            self._hold = None
             return
-
-        # Hold the target across the transition's aftershocks. Checked before
-        # the edge logic because the thing that overwrites us arrives SEVERAL
-        # TICKS AFTER the edge, by which point old_ac is already updated and
-        # nothing would fire again.
-        if self._hold is not None:
-            target, until = self._hold
-            if time.monotonic() >= until:
-                self._hold = None
-            elif conf[MODE_PATH].to(str) != target:
-                logger.info(
-                    f"TDP mode was moved off {target} during the power "
-                    f"transition (KDE's power profile does this); re-asserting"
-                )
-                conf[MODE_PATH] = target
 
         ac = _on_ac()
         if ac is None:
-            return  # unreadable: leave the mode alone rather than guess
+            return  # unreadable: leave everything alone rather than guess
 
         if self.old_ac is None:
-            # First tick adopts and writes nothing. Starting hhd must never
-            # move a mode the user chose.
             self.old_ac = ac
             return
         if ac == self.old_ac:
-            # Deliberately NOT continuous. This is the whole answer to "don't
-            # fight the user": a mode picked by hand after a transition stays
-            # picked until the next transition.
+            # Deliberately not continuous: a change made by hand after a
+            # transition stays until the next transition.
             return
 
         self.old_ac = ac
         key = "ac_preset" if ac else "dc_preset"
-        target = conf[f"{AUTO_PATH}.enabled.{key}"].to(str)
-        if target not in SELECTABLE_MODES:
-            return
-        # The hold is armed even when the mode is ALREADY the target. Nothing
-        # has been overwritten yet at this point -- the overwrite comes a few
-        # seconds later -- so arming only on a change would leave the common
-        # case (unplug, already on the battery preset) unprotected.
-        self._hold = (target, time.monotonic() + HOLD_S)
-        if target != conf[MODE_PATH].to(str):
-            logger.info(
-                f"Power source -> {'AC' if ac else 'battery'}: TDP mode -> {target}"
-            )
+        target = conf.get(f"{AUTO}.enabled.{key}", "")
+        where = "AC" if ac else "battery"
+
+        if target in STOCK_MODES:
+            logger.info(f"Power source -> {where}: TDP mode -> {target}")
             conf[MODE_PATH] = target
-
-    def _mirror(self, conf: Config):
-        """Copy the active slot's values into the keys adjustor reads."""
-        mode = conf[MODE_PATH].to(str)
-        if mode not in PRESET_MODES:
-            # Leaving a preset invalidates the baseline, so re-entering the
-            # SAME preset later still counts as a change and re-applies.
-            self.old_mirror = None
             return
 
-        watts = conf[f"tdp.asus.tdp_v2.{mode}.tdp"].to(int)
-        boost = conf[f"tdp.asus.tdp_v2.{mode}.boost"].to(bool)
-        watts = min(max(watts, MIN_TDP), MAX_TDP)
+        if f"{PRESETS}.active.{target}.tdp" not in conf:
+            return  # a preset that no longer exists
+        logger.info(f"Power source -> {where}: preset -> {target}")
+        conf[ACTIVE] = target
+        # Apply directly rather than leaving it to _apply_active: the values
+        # may be identical to what is already applied (so the change gate
+        # would skip), while the MODE may have been moved off custom in the
+        # meantime. The transition is exactly when it must be re-asserted.
+        vals = self._values(conf, target)
+        self.old_apply = (target, *vals)
+        self._apply(conf, target, *vals)
 
-        if (mode, watts, boost) == self.old_mirror:
-            return
-        self.old_mirror = (mode, watts, boost)
-        conf[CUSTOM_TDP] = watts
-        conf[CUSTOM_BOOST] = boost
+    # ── add / remove ──────────────────────────────────────────────────────
+    def _resize(self, conf: Config, delta: int) -> bool:
+        n = _clamp(conf.get(COUNT, DEFAULT_PRESETS), MIN_PRESETS, MAX_PRESETS)
+        new = _clamp(n + delta, MIN_PRESETS, MAX_PRESETS)
+        if new == n:
+            logger.info(
+                f"Preset count already at its {'maximum' if delta > 0 else 'minimum'}"
+                f" ({n})"
+            )
+            return False
+
+        if delta > 0:
+            # Seed the new slot from the active one, so a new preset starts
+            # from something useful rather than a default nobody chose.
+            # __setitem__ creates missing paths, so this lands before the tree
+            # is rebuilt and survives into it.
+            src = conf[ACTIVE].to(str)
+            dst = _pid(new)
+            base_src = f"{PRESETS}.active.{src}"
+            base_dst = f"{PRESETS}.active.{dst}"
+            if f"{base_src}.tdp" in conf:
+                for leaf in ("tdp", "boost", "ppt.mode",
+                             "ppt.manual.sppt", "ppt.manual.fppt"):
+                    if f"{base_src}.{leaf}" in conf:
+                        conf[f"{base_dst}.{leaf}"] = conf[f"{base_src}.{leaf}"].conf
+        else:
+            # Removing the tail: if it is selected, step back first, or
+            # validate_config would reset the selection to the default and the
+            # choice would look arbitrary.
+            if conf[ACTIVE].to(str) == _pid(n):
+                conf[ACTIVE] = _pid(new)
+
+        conf[COUNT] = new
+        logger.info(f"Preset slots: {n} -> {new}")
+        return True
 
     def update(self, conf: Config):
         try:
             self._tdp_ready = conf.get("hhd.settings.tdp_ready", False)
-            if STATUS_PATH not in conf:
+            if STATUS not in conf:
                 return
+
+            # get_action returns True once and self-clears.
+            changed = False
+            if conf.get_action(ADD):
+                changed = self._resize(conf, +1)
+            elif conf.get_action(REMOVE):
+                changed = self._resize(conf, -1)
+
+            # The count is also editable directly, and is what survives a
+            # restart -- settings() cannot read the config, so this is how it
+            # learns the real number. One rebuild per disagreement.
+            n = _clamp(conf.get(COUNT, DEFAULT_PRESETS), MIN_PRESETS, MAX_PRESETS)
+            if changed or n != self._count:
+                self._count = n
+                self.old_apply = None  # the tree is about to change under us
+                self.emit({"type": "settings"})
 
             if self._patched is None:
                 self._patched = _adjustor_is_patched()
@@ -290,18 +374,18 @@ class Z13TdpPlugin(HHDPlugin):
                     self._warned = True
                     logger.error(
                         "adjustor is not carrying the z13-tdp-presets patch: "
-                        "TDP presets will select the Turbo thermal profile and "
-                        "write no power limit. Run hhd-patches/install.sh."
+                        "presets still work, but a preset set to Manual power "
+                        "limits will have its PL2/PL3 derived instead. Run "
+                        "hhd-patches/install.sh."
                     )
 
-            conf[STATUS_PATH] = "" if self._patched is not False else PATCH_WARNING
+            conf[STATUS] = "" if self._patched is not False else PATCH_WARNING
         except Exception as e:
             logger.warning(f"TDP preset update failed: {e}")
 
     def close(self):
-        # Nothing to release. This plugin owns no hardware and no file
-        # descriptors -- every write went through adjustor's config keys, and
-        # leaving the last preset applied is correct: the machine keeps the
-        # power limit the user chose, exactly as it would if hhd were stopped
-        # while on the stock Custom mode.
+        # Nothing to release: this plugin owns no hardware and no descriptors.
+        # Leaving the last preset applied is correct -- the machine keeps the
+        # limit the user chose, exactly as if hhd were stopped while on the
+        # stock Custom mode.
         pass

@@ -546,26 +546,32 @@ ADJUSTOR_FUSE_PATCHES = (
 )
 
 
-# hhd-z13's TDP presets, and an upstream clock bug they depend on.
+# hhd-z13's TDP preset support, and an upstream clock bug it depends on.
 #
-# ENTRIES 1-2 -- make preset modes reachable.
-#   hhd_z13/tdp.py contributes extra modes into adjustor's OWN tdp_v2 dropdown
-#   (hhd's merge_reduce unions a mode's `modes` dict exactly as it unions a
-#   container's `children`). It writes no PPT itself. Instead it mirrors the
-#   selected preset's watts into tdp.asus.tdp_v2.custom.tdp from prepare(),
-#   which hhd runs BEFORE this file's update() in the same tick -- __main__.py
-#   calls run_plugin_cmd(..., reverse=True) for prepare, i.e. descending
-#   priority, and adjustor implements no prepare() at all.
+# THE PRESETS THEMSELVES NEED NO PATCH.
+#   An earlier version of this table widened adjustor's mode dispatch so extra
+#   dropdown entries reached its custom apply path. That was dropped. Presets
+#   are now stored VALUE SETS: selecting one writes adjustor's own
+#   tdp.asus.tdp_v2.custom.* keys and selects Custom -- the identical path a
+#   user takes by hand.
 #
-#   Two things stand in the way, both here. Upstream gates every PPT write on
-#   `mode == "custom"`, and its preset dispatch ends in `case _:` meaning
-#   "performance" -- so an unrecognised mode would set the Turbo thermal
-#   profile and write no PPT whatsoever. Both entries are written as "not one
-#   of the three modes upstream actually handles", so this file never has to
-#   know hhd-z13's mode names and behaviour is identical with no presets
-#   installed.
+#   Reusing the stock path instead of widening it is what makes this robust.
+#   There is no new mode for KDE to eject: unplugging makes KDE change its
+#   power profile, which adjustor maps onto a stock mode and FORCE-writes over
+#   the config. Against a preset mode that silently replaced the user's
+#   choice. Against Custom it only flips the visible LABEL to Silent, because
+#   the quiet branch writes a fan curve and never touches PPT -- so the
+#   wattage survives, which is the behaviour stock Custom has always had.
 #
-# ENTRIES 3-4 -- an upstream bug, and a hard prerequisite for retiring
+# ENTRY 1 -- per-preset PL2/PL3.
+#   Upstream derives the short and fast limits from the sustained value via a
+#   MAX_TDP_BOOST constant chosen for the ROG Ally, which collapses all three
+#   to the same number at or above 35 W. A preset wanting explicit limits
+#   publishes them on two config keys; when both are non-zero they are written
+#   instead of the derived pair. Absent or zero, upstream behaviour is
+#   untouched -- including for the stock Custom mode, which never sets them.
+#
+# ENTRIES 2-3 -- an upstream bug, and a hard prerequisite for retiring
 # z13-hibernate's tdp-restore.sh.
 #   update() computes `curr = time.perf_counter()` and drains the debounce
 #   with `self.queue_tdp < curr`, but notify() arms it with `time.time()`.
@@ -584,41 +590,35 @@ ADJUSTOR_FUSE_PATCHES = (
 #   report as "TDP doesn't come back after sleep".
 ADJUSTOR_ASUS_PATCHES = (
     (
-        "preset-fallthrough",
-        '        if tdp_reset and mode != "custom":\n',
+        "ppt-override",
+        "                self.queue_tdp = None\n                if boost:\n",
         """\
-        # {mark}: name the three modes upstream actually handles, instead of
-        # "anything that is not custom". The match below ends in `case _:`
-        # meaning performance, so hhd-z13's preset modes would otherwise set
-        # the Turbo thermal profile here and then write no PPT at all.
-        #
-        # Identical behaviour with no presets installed: tdp_reset is only
-        # ever True when mode is not None (both guards above test it), and the
-        # only non-None values upstream itself produces are these three and
-        # "custom".
-        if tdp_reset and mode in ("quiet", "balanced", "performance"):
+                self.queue_tdp = None
+                # {mark}: explicit PL2/PL3 when an hhd-z13 preset supplies
+                # them. Upstream's derived pair below uses MAX_TDP_BOOST = 35,
+                # an ROG Ally constant with upstream's own "TODO: Make per
+                # device", so min(max(steady, 35), steady * 1.4) collapses to
+                # steady for anything at or above 35 W -- the boost toggle
+                # does nothing there. These keys let a preset state the three
+                # limits outright.
+                #
+                # Both must be non-zero to take effect, so the stock Custom
+                # mode -- which never writes them -- keeps upstream behaviour
+                # exactly. Ordering (PL1 <= PL2 <= PL3) is enforced by the
+                # producer, because the firmware rejects a lower tier that
+                # exceeds a higher one rather than clamping it.
+                _z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)
+                _z13_f = conf.get("tdp.asus.z13_presets.fppt", 0)
+                if _z13_s and _z13_f:
+                    time.sleep(TDP_DELAY)
+                    set_tdp("fast", FTDP_FN, _z13_f)
+                    time.sleep(TDP_DELAY)
+                    set_tdp("slow", STDP_FN, _z13_s)
+                    time.sleep(TDP_DELAY)
+                    set_tdp("steady", CTDP_FN, steady)
+                elif boost:
 """,
-        'if tdp_reset and mode in ("quiet", "balanced", "performance"):',
-        "replace",
-    ),
-    (
-        "preset-apply",
-        '        if mode == "custom":\n',
-        """\
-        # {mark}: run the whole custom apply path for hhd-z13's preset modes
-        # too. Everything inside reads tdp.asus.tdp_v2.custom.tdp and
-        # .custom.boost, and hhd-z13 mirrors the ACTIVE preset's own slider
-        # into exactly those two keys from prepare(), which runs before this
-        # update() in the same tick. So the clamping, the debounce, the
-        # thermal-profile selection, the PPD "energy" report and the
-        # resume/AC re-apply all work unchanged, with no second PPT writer
-        # anywhere in the system.
-        #
-        # mode is None-guarded because upstream skipped this branch for None
-        # and there is no reason to start writing PPT for it.
-        if mode == "custom" or (mode and mode not in ("quiet", "balanced", "performance")):
-""",
-        'if mode == "custom" or (mode and mode not in',
+        '_z13_s = conf.get("tdp.asus.z13_presets.sppt", 0)',
         "replace",
     ),
     (
