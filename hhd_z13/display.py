@@ -130,6 +130,14 @@ OVERDRIVE_RATE = "overdrive"
 # (i.e. "auto") is a policy, not a selection, and is resolved before use.
 RATES = (BATTERY_RATE, TOP_RATE, OVERDRIVE_RATE)
 
+# What Auto is allowed to choose. Deliberately EXCLUDES OVERDRIVE_RATE.
+# Overdrive changes image quality -- it trades motion blur for possible
+# overshoot on high-contrast edges -- and that is a judgement only the user
+# should make. Auto reacting to a charger must never alter how the panel
+# renders, only how fast it refreshes, so plugging in can never silently
+# introduce ghosting. Overdrive is reachable from the Manual selector alone.
+AUTO_RATES = (BATTERY_RATE, TOP_RATE)
+
 
 def _rate_hz(sel):
     """The actual refresh rate a selection asks for.
@@ -379,7 +387,11 @@ def _resolve_rate(mode, manual, backend):
     ac = _on_ac()
     if ac is None:
         return None
-    return TOP_RATE if ac else BATTERY_RATE
+    # From AUTO_RATES, never RATES: auto must not be able to reach the
+    # overdrive tier. Indexing the tuple rather than naming the constants
+    # keeps that guarantee in one place -- if OVERDRIVE_RATE were ever added
+    # to AUTO_RATES the mistake would be visible there, not buried here.
+    return AUTO_RATES[1] if ac else AUTO_RATES[0]
 
 def _run_as_user(session, args, timeout=KSCREEN_TIMEOUT_S):
     """subprocess.run dropped to the desktop session's uid/gid, mirroring
@@ -669,11 +681,22 @@ class Z13DisplayPlugin(HHDPlugin):
         # quiet until the charger actually moves.
         if rate_mode == "manual":
             live = read_rate(session, backend, display)
-            if live is not None and live != self.old_rate:
+            # Compare against the Hz the SELECTION implies, not the selection
+            # itself. read_rate returns what kscreen reports -- "60" or "180",
+            # never "overdrive" -- so comparing raw would read the overdrive
+            # tier as permanent drift: every reconcile would overwrite the
+            # user's choice with "180" while leaving overdrive on in hardware,
+            # desyncing the control from the panel within RECONCILE_INTERVAL_S.
+            if live is not None and live != _rate_hz(self.old_rate):
                 self.old_rate = live
                 conf[
                     "gamemode.display.status.available.refresh_rate.manual.rate"
                 ] = live
+                # Genuine external drift, and `live` is a plain rate, so the
+                # overdrive tier is no longer selected. Clear the flag here --
+                # the apply branch above will not run, since old_rate now
+                # equals what the panel is already showing.
+                _apply_overdrive(False)
                 # Someone changed the rate outside hhd (KDE display settings, a
                 # script). The bridge applies the same either way.
                 if backend == "kscreen":
