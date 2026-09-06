@@ -1,7 +1,10 @@
 z13_display:
   title: Z13 Display
   type: container
-  tags: [ non-essential ]
+  # hide-title: nested inside hhd's own "Display" container, so its own
+  # header would duplicate that grouping. Title kept for i18n and logs, the
+  # same way every upstream driver that nests does it.
+  tags: [ hide-title, non-essential ]
   hint: >-
     Internal panel refresh rate (60/180 Hz), via kscreen-doctor -- run
     inside your KDE Wayland session, not by hhd directly, since hhd itself

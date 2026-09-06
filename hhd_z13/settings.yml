@@ -1,7 +1,13 @@
 z13_cpu:
   title: Z13 CPU
   type: container
-  tags: [ non-essential ]
+  # hide-title: the container is nested inside adjustor's "Processor
+  # Settings", so rendering its own header too reads as a duplicate grouping
+  # of the same thing. The title is kept rather than deleted -- it is what
+  # the i18n extractor and log/debug output identify this block by, and every
+  # upstream driver that nests does the same (adjustor's asus/msi/gpu/general,
+  # hhd's aura and rgb all carry a title alongside hide-title).
+  tags: [ hide-title, non-essential ]
   hint: >-
     CPU power controls via z13ctl-plus. Replaces hhd's own CPU Power/Boost
     sliders under Processor Settings, which either duplicate this (EPP) or do
