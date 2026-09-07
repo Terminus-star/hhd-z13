@@ -508,7 +508,25 @@ class Z13TdpPlugin(HHDPlugin):
                 # -- the slider would work but choosing a preset would not.
                 # Falling through also recomputes PL2/PL3 for the new PL1 in
                 # this same tick, so the panel is never briefly inconsistent.
+                #
+                # self._hold ALSO has to go here, and missing this was a real
+                # bug: _hold_choice() runs before this method every tick
+                # (prepare()'s call order), and while a transition hold is
+                # still armed it re-asserts the mode it is holding whenever
+                # conf[MODE_PATH] no longer reads as that target -- which is
+                # indistinguishable, from _hold_choice's side, from KDE having
+                # silently switched profiles out from under us. So: edit the
+                # slider within the hold window, this branch forks to Custom
+                # correctly on THIS tick, and on the very NEXT tick
+                # _hold_choice sees mode="custom" != the held preset, logs
+                # "TDP mode moved off {target}... re-asserting", and snaps it
+                # straight back -- reproducing "hard locked to 9W" through a
+                # different mechanism than the one already fixed for it.
+                # Clearing the hold here is correct unconditionally: once the
+                # user has deliberately forked away, there is nothing left to
+                # protect the held preset FROM.
                 logger.info(f"Edited while on {mode}; switching to Custom at {watts}W")
+                self._hold = None
                 conf[MODE_PATH] = "custom"
                 mode = "custom"
             else:
@@ -631,6 +649,14 @@ class Z13TdpPlugin(HHDPlugin):
         # Custom, which is where the values came from.
         conf[MODE_PATH] = "custom"
         self.old_state = None
+        # Same fix, same reason as the fork-to-Custom branch in _sync(): if a
+        # hold was armed for the preset just removed, _hold_choice would see
+        # mode="custom" on the next tick, decide it "moved off" the held
+        # target, and call _apply_preset() on an id that no longer exists in
+        # the store -- which _preset() correctly returns None for, but not
+        # before _hold_choice has already rewritten conf[MODE_PATH] back to
+        # that now-nonexistent id.
+        self._hold = None
         logger.info(f"Removed preset {i + 1}")
         return True
 
