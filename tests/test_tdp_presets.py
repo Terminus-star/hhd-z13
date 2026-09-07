@@ -272,16 +272,48 @@ def with_ac(v):
     t._on_ac = lambda: v
 
 
-# ==========================================================================
-# 3. The power policy OWNS the TDP mode
-# ==========================================================================
-# The contract changed here, deliberately. This was edge-triggered, with a
-# 15s hold to survive KDE's competing profile switch and separate arms for
-# boot and for resume: four mechanisms all answering "when may we act?", each
-# with a window in which a second writer won by being late.
-#
-# Now there is one owner. While the policy is enabled it asserts its target on
-# every tick, so there is nothing to time and no window to lose.
+store([{"tdp": 45, "boost": True, "sppt": 56, "fppt": 64},
+       {"tdp": 9, "boost": True, "sppt": 11, "fppt": 13}])
+p = plugin()
+c = mkconf(mode="custom", power="enabled", ac="z13_p1", dc="z13_p2", presets=2)
+with_ac(True)
+p.prepare(c)
+# The first tick APPLIES. A boot is a power change nobody watched -- shut
+# down on battery, started plugged in -- so there is no edge to act on and
+# an adopt-only first tick would sit on the wrong preset until the next
+# unplug. Same reasoning as the resume case further down.
+ok(c[t.MODE_PATH].to(str) == "z13_p1",
+   f"the first tick applies the preset for the live source ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 45, "with that preset's wattage")
+# The fake clock is not installed until further down, so the boot apply's
+# hold cannot be waited out here. Drop it by hand: this block is about the
+# edge logic, and the hold has its own tests below.
+p._hold = None
+with_ac(False)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2", f"unplugging selects the preset ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, "and applies it")
+with_ac(None)
+before = c[t.MODE_PATH].to(str)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == before, "an unreadable charger changes nothing")
+
+
+# --- the transition is held against KDE ------------------------------------
+# Unplugging fires two policies at once: ours picks a mode, and KDE switches
+# its own power profile. KDE's arrives as a ppd event a moment later, adjustor
+# maps it to a stock mode and FORCE-writes it after our prepare(), so it wins.
+# Measured on hardware: z13_p1 selected on unplug, 40 W (quiet's wattage)
+# applied two seconds later, and the QAM showing Silent.
+class _Clock:
+    now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+clock = _Clock()
+t.time = clock
 
 store([{"tdp": 45, "boost": True, "sppt": 56, "fppt": 64},
        {"tdp": 9, "boost": True, "sppt": 11, "fppt": 13}])
@@ -289,80 +321,110 @@ p = plugin()
 c = mkconf(mode="custom", power="enabled", ac="z13_p1", dc="z13_p2", presets=2)
 with_ac(True)
 p.prepare(c)
-# No special first tick any more: boot, resume and unplug are the same case,
-# which is read the charger and assert the preset that matches it.
-ok(c[t.MODE_PATH].to(str) == "z13_p1",
-   f"the first tick applies the preset for the live source ({c[t.MODE_PATH].to(str)})")
-ok(c[t.CUSTOM_TDP].to(int) == 45, "with that preset's wattage")
-
 with_ac(False)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_p2",
-   f"unplugging selects the battery preset ({c[t.MODE_PATH].to(str)})")
-ok(c[t.CUSTOM_TDP].to(int) == 9, "and applies it")
+ok(c[t.MODE_PATH].to(str) == "z13_p2", "unplugging selects the battery preset")
 
-with_ac(None)
-before = c[t.MODE_PATH].to(str)
+c[t.MODE_PATH] = "quiet"          # what adjustor's ppd handler does to us
+clock.now += 2                    # the measured delay
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == before, "an unreadable charger changes nothing")
+ok(c[t.MODE_PATH].to(str) == "z13_p2",
+   f"a ppd change during the transition is overridden ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, "and the preset's own values are restored with it")
+
+# ...but only for the window. A profile picked later is a real choice.
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "quiet"
+p.prepare(c)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "quiet",
+   f"after the window, a hand-picked mode sticks ({c[t.MODE_PATH].to(str)})")
+
+# The hold arms even when the mode is ALREADY the target -- the overwrite
+# lands seconds later, so arming only on a change leaves the common case
+# (unplugging while already on the battery preset) unprotected.
+clock.now += 100
+with_ac(True)
+p.prepare(c)
+clock.now += 100
 with_ac(False)
-
-# --- KDE loses, and there is no window to wait out ------------------------
-# Unplugging fires two policies at once: ours picks a mode, and KDE switches
-# its own power profile. KDE's arrives as a ppd event a moment later, adjustor
-# maps it onto a stock mode and FORCE-writes it after our prepare(). Measured
-# on hardware: z13_p1 selected on unplug, 40 W -- quiet's wattage -- applied
-# two seconds later, with the QAM showing Silent.
-c[t.MODE_PATH] = "quiet"
+c[t.MODE_PATH] = "z13_p2"
+p.prepare(c)
+c[t.MODE_PATH] = "balanced"
+clock.now += 2
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_p2",
-   f"a ppd change is overridden ({c[t.MODE_PATH].to(str)})")
-ok(c[t.CUSTOM_TDP].to(int) == 9, "and the preset's own values come back with it")
+   f"the hold arms with no mode change to make ({c[t.MODE_PATH].to(str)})")
 
-# The old hold expired after 15 seconds and let everything after that
-# through. Nothing expires now, so the same push is refused however late.
-for _ in range(20):
-    c[t.MODE_PATH] = "balanced"
-    p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_p2", "and refused indefinitely, not for a window")
-
-# The cost of that, stated as a test because it is a real behaviour change:
-# a mode picked by hand is corrected too. Nothing can distinguish a person
-# clicking Silent from KDE writing it, so the policy overrules both.
-c[t.MODE_PATH] = "quiet"
-p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_p2", "a hand-picked mode does not survive either")
-
-# Steady state must be inert. Writing the mode every tick would re-arm
-# adjustor's debounce every two seconds and it would never drain -- the one
-# oscillation this design can have.
-for _ in range(5):
-    p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "z13_p2" and c[t.CUSTOM_TDP].to(int) == 9,
-   "the steady state is stable across repeated ticks")
-
-# --- disabled means disabled ----------------------------------------------
-# The escape hatch, and the only way to pick a mode by hand: with the policy
-# off the plugin asserts nothing and the dropdown is adjustor's again.
+# Turning the policy off must drop the hold, or it would keep re-asserting a
+# choice the policy is no longer making.
 p2 = plugin()
 c2 = mkconf(mode="custom", power="disabled", presets=2)
+p2._hold = ("z13_p1", clock.now + 100)
 p2.prepare(c2)
-ok(c2[t.MODE_PATH].to(str) == "custom", "a disabled policy asserts nothing")
+ok(p2._hold is None, "disabling the policy drops the hold")
+ok(p2._recheck is False, "and the boot arm, so enabling it later does not fire")
+
+# With the policy off, a resume must not queue an apply either -- otherwise
+# switching the policy back on days later would yank the mode as its first
+# act, which reads as the setting doing something it was never asked to do.
+p2.notify([{"type": "special", "event": "wakeup"}])
+p2.prepare(c2)
+ok(p2._recheck is False, "a resume while disabled queues nothing")
 c2[t.MODE_PATH] = "quiet"
 p2.prepare(c2)
-p2.prepare(c2)
-ok(c2[t.MODE_PATH].to(str) == "quiet",
-   "and a hand-picked mode stays picked")
+ok(c2[t.MODE_PATH].to(str) == "quiet", "and the mode is left where it was")
 
-# --- a target that no longer exists ---------------------------------------
-# Presets are removable, so the policy can end up aimed at one that is gone.
-# Leave the mode alone rather than write the missing name: adjustor's
-# unknown-mode case falls through to Performance with no PPT write at all.
-p3 = plugin()
-c3 = mkconf(mode="custom", power="enabled", ac="z13_p7", dc="z13_p7", presets=2)
-with_ac(True)
-p3.prepare(c3)
-ok(c3[t.MODE_PATH].to(str) == "custom", "a removed preset as target changes nothing")
+
+# --- a resume re-evaluates, with no edge to trigger on ---------------------
+# Hibernate restores this process from the image with old_ac exactly as it
+# was, so a charger moved while the machine was OFF produces no transition.
+# Observed after a hibernate: on battery, dc_preset set, and the mode still
+# whatever was selected beforehand.
+clock.now += 100
+store([{"tdp": 45, "boost": True, "sppt": 56, "fppt": 64},
+       {"tdp": 9, "boost": True, "sppt": 11, "fppt": 13}])
+p = plugin()
+c = mkconf(mode="balanced", power="enabled", ac="balanced", dc="z13_p2", presets=2)
+with_ac(False)
+p.prepare(c)                      # boot: armed, so this applies dc_preset
+# Past the boot apply and its hold, the policy is edge-triggered again. Pick
+# a mode by hand and give it a wattage the preset would overwrite, so the
+# resume below has something to actually restore.
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "balanced"
+c[t.CUSTOM_TDP] = 45
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced", "steady state leaves the mode alone")
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced", "and keeps leaving it alone — no edge")
+
+p.notify([{"type": "special", "event": "wakeup"}])
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2",
+   f"a resume applies the preset for the CURRENT source ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, "and its values")
+
+# The resume arms the hold too, which is right: KDE changes its power profile
+# on resume just as it does on unplug, so the choice has to survive that.
+c[t.MODE_PATH] = "quiet"
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2", "the resume choice is held like any other")
+
+# One re-evaluation per resume, not a permanent loss of edge-triggering.
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "balanced"
+p.prepare(c)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced",
+   "afterwards it is edge-triggered again, so a hand-picked mode sticks")
+
+# Unrelated events must not trigger it.
+p.notify([{"type": "special", "event": "something_else"}, {"type": "ppd"}])
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "balanced"
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced", "other events do not force a re-evaluation")
 
 # A rebuild is fatal to an unpatched adjustor -- it clears tdp_ready, which
 # has no default, and adjustor only ever sets it once behind a latched

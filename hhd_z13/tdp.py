@@ -47,6 +47,7 @@ import glob
 import json
 import logging
 import os
+import time
 from copy import deepcopy
 
 from hhd.plugins import HHDPlugin, load_relative_yaml
@@ -58,7 +59,7 @@ logger = logging.getLogger(__name__)
 
 MAX_PRESETS = 8
 
-# There is no hold constant any more, and the reason is worth recording.
+# How long a power-change selection is held against anything that moves it.
 #
 # Unplugging fires TWO policies at once: ours picks a mode, and KDE
 # independently switches its own power profile. KDE's arrives as a "ppd" event
@@ -67,16 +68,12 @@ MAX_PRESETS = 8
 # Measured: selecting z13_p1 (9 W) on unplug, and 40 W -- quiet's wattage --
 # applied two seconds later.
 #
-# ppd-echo cannot help: that patch entry suppresses adjustor answering an echo
-# of its OWN report, while this is a genuine desktop-initiated change that
-# merely happens to react to the same unplug we do. The first answer was a
-# 15-second hold -- re-assert the choice, then stop, so a mode picked by hand
-# a moment later still won.
-#
-# That was a truce between two owners, and it lost every fight that arrived on
-# the 16th second. The policy is now the single owner instead: while it is
-# enabled it asserts its target on EVERY tick, so nothing has to be timed.
-# Choosing a mode by hand means editing the policy, or turning it off.
+# ppd-echo cannot help here. That entry suppresses adjustor answering an echo
+# of its OWN report; this is a genuine desktop-initiated change that merely
+# happens to be reacting to the same unplug we are. So the resolution has to
+# be on our side: hold the choice across the transition's aftershocks, then
+# stop, so a profile picked by hand a moment later still wins.
+HOLD_S = 15.0
 
 # NOT /etc/hhd: hhd watches that directory and reloads its whole configuration
 # on any write there. See the module docstring.
@@ -184,9 +181,17 @@ class Z13TdpPlugin(HHDPlugin):
         self._gen_boost = True     # boost value the current tree was built for
         self._gen_n = 0            # preset count the current tree was built for
 
-        # No old_ac, no hold, no resume arm. Every one of those existed to
-        # answer "when should the policy act?", and the answer is now "always,
-        # while it is enabled" -- which needs no state to remember.
+        self.old_ac = None         # None = no previous source to compare to
+        self._hold = None          # (mode, deadline) while a transition settles
+        # Start ARMED. A fresh boot is a power change nobody watched, exactly
+        # like the hibernate case notify() exists for: the machine can be shut
+        # down on AC and started on battery, and the mode restored from
+        # state.yml is whatever the previous session ended on. There is no
+        # edge, so an adopt-only first tick would leave the wrong preset in
+        # place until the next unplug -- the same symptom, reached by booting
+        # instead of resuming. Arming here makes the first tick re-evaluate
+        # against the CURRENT source, through the resume path below.
+        self._recheck = True
         self.old_state = None      # (mode, watts, boost, sppt, fppt)
         self.old_applied = None    # last telemetry string written
         self._patched = None
@@ -195,11 +200,24 @@ class Z13TdpPlugin(HHDPlugin):
     def open(self, emit, context, *args, **kwargs):
         self.emit = emit
 
-    # No notify(). It used to catch hhd's wakeup event, because a charger
-    # moved while the machine was hibernated produced no edge to act on. A
-    # continuously-asserting policy has the same blind spot in reverse: there
-    # is nothing to miss, because the next tick re-reads the charger anyway.
-    # Boot, resume and unplug are no longer three cases.
+    def notify(self, events):
+        """Watch for a resume.
+
+        The power-change policy is edge-triggered, which is right while the
+        system is running and wrong across a suspend: hibernate restores this
+        process from the image with old_ac exactly as it was, so a charger
+        moved while the machine was OFF produces no edge to act on. Observed
+        after a hibernate -- on battery, dc_preset set, and the mode still on
+        whatever was selected beforehand, because nothing had transitioned
+        from hhd's point of view.
+
+        A resume is therefore treated as "re-evaluate", not "adopt": the
+        power source is authoritative again, whether or not it changed while
+        we were not running.
+        """
+        for ev in events:
+            if ev.get("type") == "special" and ev.get("event") == "wakeup":
+                self._recheck = True
 
     # ── the store ─────────────────────────────────────────────────────────
     def _load(self):
@@ -311,7 +329,8 @@ class Z13TdpPlugin(HHDPlugin):
             # exactly when that window is hit, so it is guarded instead.
             if any(k not in conf for k in (MODE_PATH, CUSTOM_TDP, CUSTOM_BOOST)):
                 return
-            self._power_policy(conf)
+            self._hold_choice(conf)
+            self._power_change(conf)
             self._sync(conf)
         except Exception as e:
             logger.warning(f"TDP preset prepare failed: {e}")
@@ -399,54 +418,73 @@ class Z13TdpPlugin(HHDPlugin):
         self._publish(watts, sppt, fppt)
         self.old_state = (mode, watts, boost, sppt, fppt)
 
-    def _power_policy(self, conf):
-        """While enabled, the policy OWNS the TDP mode. Asserted every tick.
+    def _hold_choice(self, conf):
+        """Re-assert a power-change selection while the transition settles.
 
-        This used to be edge-triggered, with a 15s hold bolted on to survive
-        KDE's competing profile switch, plus a resume arm and a boot arm for
-        the transitions that happen while nobody is watching. Four mechanisms,
-        each answering "when may we act?", each with its own blind spot: a
-        charger moved during hibernate, a boot on the other source, an
-        overwrite arriving on the 16th second.
-
-        Asserting continuously deletes the question. There is one owner of the
-        mode while the policy is on, so there is nothing to time, nothing to
-        re-arm, and no window in which a second writer wins by being late.
-
-        The cost is that a mode picked by hand is corrected on the next tick.
-        That is the trade being made deliberately: to choose a mode, either
-        point the policy at it or turn the policy off.
+        Checked BEFORE the edge logic, because what overwrites us arrives
+        seconds after the edge -- by which point old_ac is already updated and
+        nothing would fire again.
         """
+        if self._hold is None:
+            return
+        target, until = self._hold
+        if time.monotonic() >= until:
+            self._hold = None
+            return
+        if conf[MODE_PATH].to(str) == target:
+            return
+        logger.info(f"TDP mode moved off {target} during the power transition; re-asserting")
+        conf[MODE_PATH] = target
+        if target.startswith(PRESET_PREFIX):
+            self._apply_preset(conf, target)
+        else:
+            self.old_state = None
+
+    def _power_change(self, conf):
+        """Follow the charger, on the EDGE only."""
         if f"{POWER}.mode" not in conf:
             return
         if conf[f"{POWER}.mode"].to(str) != "enabled":
-            return  # off: adjustor's dropdown behaves exactly as it ships
+            # Re-arm, so turning the policy back on adopts the current source
+            # rather than firing a stale edge from before it was off.
+            self.old_ac = None
+            self._hold = None
+            # Drop a pending re-evaluation too. With the policy off, a boot or
+            # a resume must not leave an apply queued that fires the instant
+            # it is switched back on. Enabling adopts the current source; the
+            # next real transition is what acts.
+            self._recheck = False
+            return
         ac = _on_ac()
         if ac is None:
             return  # unreadable: leave everything alone rather than guess
 
+        recheck, self._recheck = self._recheck, False
+
+        if self.old_ac is None:
+            self.old_ac = ac
+            if not recheck:
+                return
+        elif ac == self.old_ac and not recheck:
+            # Not continuous: a mode picked by hand after a transition stays
+            # until the next transition. A resume is the one exception -- see
+            # notify() -- because the transition may have happened while this
+            # process was not running to see it.
+            return
+        self.old_ac = ac
         key = "ac_preset" if ac else "dc_preset"
         target = conf.get(f"{POWER}.enabled.{key}", "")
-        if target not in STOCK_MODES and self._preset(target) is None:
-            # A preset that has since been removed. Do nothing and leave the
-            # mode where it is; validate_config resets the stale enum itself.
-            return
-        if conf[MODE_PATH].to(str) == target:
-            # Load-bearing: the steady state must write NOTHING. Writing every
-            # tick would re-arm adjustor's debounce every two seconds, which is
-            # the one oscillation this design can have.
-            return
-
-        # Only reached on an actual correction, so this line is the fight
-        # detector: once on an unplug is normal, once every two seconds means
-        # something else is writing the mode and losing. Deliberately not
-        # rate-limited.
-        logger.info(f"TDP mode -> {target} ({'AC' if ac else 'battery'} policy)")
-        conf[MODE_PATH] = target
-        if target in STOCK_MODES:
-            self.old_state = None
-        else:
-            self._apply_preset(conf, target)
+        if target in STOCK_MODES or self._preset(target) is not None:
+            logger.info(f"Power source -> {'AC' if ac else 'battery'}: {target}")
+            # Armed even when the mode is ALREADY the target: the overwrite
+            # lands seconds later, so arming only on a change would leave the
+            # common case unprotected.
+            self._hold = (target, time.monotonic() + HOLD_S)
+            conf[MODE_PATH] = target
+            if target in STOCK_MODES:
+                self.old_state = None
+            else:
+                self._apply_preset(conf, target)
 
     # ── add / remove ──────────────────────────────────────────────────────
     def _add(self, conf):

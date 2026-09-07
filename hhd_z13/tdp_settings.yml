@@ -115,16 +115,14 @@ preset_template:
 z13_power:
   type: mode
   title: Preset on Power Change
-  # Default disabled: enabling it hands the TDP Mode selector over to this
-  # section entirely, which is a bigger change than a first-run default should
-  # make on someone's behalf.
+  # Default disabled: enabling it means unplugging can move you off something
+  # you chose by hand.
   default: disabled
   hint: >-
-    While enabled, this OWNS TDP Mode: the selector above follows whichever
-    preset matches the current power source, and is re-asserted if anything
-    moves it -- including KDE switching its own power profile on unplug. That
-    is the point, so nothing competes for the setting. To pick a mode by hand,
-    change the preset here or turn this off.
+    Switch TDP Mode automatically when the charger is plugged in or unplugged.
+    Edge-triggered -- it acts on the transition, never continuously, so a
+    change you make by hand afterwards stays. On startup it adopts the current
+    power source without applying anything.
   modes:
     disabled:
       type: container
