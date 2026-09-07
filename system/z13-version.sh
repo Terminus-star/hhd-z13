@@ -6,6 +6,13 @@
 #   sudo ./z13-version.sh latest          # go back to the branch tip
 #   sudo ./z13-version.sh v0.3.0 -y       # skip the confirmation
 #
+# STRANDED? If a switch removed this script, nothing is lost -- it is still in
+# git, on the branch you came from:
+#
+#   cd /home/termis/Projects/hhd-z13 && git checkout master
+#
+# The tag is only a checkout; every commit and tag is still there.
+#
 # WHY THIS EXISTS
 #   v0.3.0 is the last release that did not touch TDP. Everything after it
 #   takes PPT ownership away from z13ctl-plus and retires z13-hibernate's
@@ -42,6 +49,41 @@ die()  { printf '  \033[31mERROR: %s\033[0m\n' "$*"; exit 1; }
 TARGET=${1:-}
 ASSUME_YES=0
 [ "${2:-}" = "-y" ] && ASSUME_YES=1
+
+# ── do not let the switch delete the switcher ─────────────────────────────
+# This script lives inside the tree it checks out, so switching to a tag that
+# predates it removes it -- and with it the only way back. That happened:
+# a switch to v0.3.0 left a checkout with no system/z13-version.sh, no way to
+# run `latest`, and no obvious clue where it had gone.
+#
+# Same answer the patcher already uses: run from a stable copy outside the
+# repo. hhd-patches installs itself to /usr/local/lib/z13/, which is exactly
+# why `--check` kept working across every checkout tonight.
+STABLE=/usr/local/lib/z13/z13-version.sh
+SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+
+if [ "$SELF" != "$STABLE" ]; then
+  case "$SELF" in
+    "$REPO"/*)
+      # Running from inside the repo about to move. Stage a copy and hand
+      # over to it, so the rest of this run cannot be pulled out from under
+      # us mid-checkout.
+      if [ "$(id -u)" -eq 0 ]; then
+        mkdir -p "$(dirname "$STABLE")" 2>/dev/null
+        if cp -f "$SELF" "$STABLE" 2>/dev/null; then
+          chmod 755 "$STABLE"
+          printf '  \033[32m+ staged a copy at %s\033[0m\n' "$STABLE"
+          printf '  %s\n' "re-running from there so the checkout cannot remove it"
+          exec "$STABLE" "$@"
+        fi
+      else
+        printf '  \033[33m! running from inside %s\033[0m\n' "$REPO"
+        printf '  %s\n' "Switching away can delete this script. Run with sudo so it"
+        printf '  %s\n' "can stage a copy at $STABLE first."
+      fi
+      ;;
+  esac
+fi
 
 # ── where are we ──────────────────────────────────────────────────────────
 [ -d "$REPO/.git" ] || die "no git checkout at $REPO (set Z13_REPO)"
