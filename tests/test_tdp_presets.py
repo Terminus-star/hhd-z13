@@ -413,8 +413,11 @@ with_ac(False)
 p.prepare(c)                      # boot: armed, so this applies dc_preset
 # Past the boot apply and its hold, the policy is edge-triggered again. Pick
 # a mode by hand and give it a wattage the preset would overwrite, so the
-# resume below has something to actually restore.
-clock.now += t.HOLD_S + 1
+# resume below has something to actually restore. RESUME_HOLD_S, not
+# HOLD_S: the boot arm goes through the same path as a resume and takes the
+# longer hold, because a desktop's power stack settles far more slowly after
+# waking than after an unplug.
+clock.now += t.RESUME_HOLD_S + 1
 c[t.MODE_PATH] = "balanced"
 c[t.CUSTOM_TDP] = 45
 p.prepare(c)
@@ -433,9 +436,12 @@ ok(c[t.CUSTOM_TDP].to(int) == 9, "and its values")
 c[t.MODE_PATH] = "quiet"
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_p2", "the resume choice is held like any other")
+ok(t.RESUME_HOLD_S > t.HOLD_S,
+   f"and for longer than an unplug ({t.RESUME_HOLD_S}s vs {t.HOLD_S}s), because "
+   f"the desktop rewrote its profile 18s after a measured resume")
 
 # One re-evaluation per resume, not a permanent loss of edge-triggering.
-clock.now += t.HOLD_S + 1
+clock.now += t.RESUME_HOLD_S + 1
 c[t.MODE_PATH] = "balanced"
 p.prepare(c)
 p.prepare(c)
@@ -444,7 +450,7 @@ ok(c[t.MODE_PATH].to(str) == "balanced",
 
 # Unrelated events must not trigger it.
 p.notify([{"type": "special", "event": "something_else"}, {"type": "ppd"}])
-clock.now += t.HOLD_S + 1
+clock.now += t.RESUME_HOLD_S + 1
 c[t.MODE_PATH] = "balanced"
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "balanced", "other events do not force a re-evaluation")
