@@ -93,6 +93,10 @@ HOLD_S = 15.0
 # sized to an observed phenomenon, not a guess that bigger is safer.
 RESUME_HOLD_S = 60.0
 
+# How much wall-clock time must go missing before we call it a sleep. Any real
+# suspend loses far more than this; nothing in a normal tick loses any.
+SLEEP_GAP_S = 5.0
+
 # NOT /etc/hhd: hhd watches that directory and reloads its whole configuration
 # on any write there. See the module docstring.
 STORE_PATH = "/var/lib/hhd-z13/presets.json"
@@ -210,6 +214,9 @@ class Z13TdpPlugin(HHDPlugin):
         # instead of resuming. Arming here makes the first tick re-evaluate
         # against the CURRENT source, through the resume path below.
         self._recheck = True
+        # Wall/monotonic pair for our own sleep detector. See _detect_sleep().
+        self._last_wall = None
+        self._last_mono = None
         self.old_state = None      # (mode, watts, boost, sppt, fppt)
         self.old_applied = None    # last telemetry string written
         self._patched = None
@@ -230,8 +237,52 @@ class Z13TdpPlugin(HHDPlugin):
         #     journalctl -u hhd@$USER | grep "Z13T.*policy:"
         logger.info(
             f"policy: edge-triggered, hold {HOLD_S:.0f}s "
-            f"(resume {RESUME_HOLD_S:.0f}s), store {STORE_PATH}"
+            f"(resume {RESUME_HOLD_S:.0f}s), sleep-detect {SLEEP_GAP_S:.0f}s, "
+            f"store {STORE_PATH}"
         )
+
+    def _detect_sleep(self):
+        """Notice a suspend or hibernate ourselves, and say so.
+
+        hhd detects a wake by polling /sys/power/wakeup_count and requiring an
+        8-second gap. That is not reliable across a HIBERNATE: the kernel is
+        restored from the image along with everything else, so the counter can
+        come back holding the value it had before the machine powered off, and
+        the change hhd is watching for never happens.
+
+        Observed 2026-09-07: a hibernate resumed at 17:15:32 with hhd alive and
+        ticking (ACPI events either side of it), and NO wakeup event was
+        emitted at all. Both the TDP resume re-apply and the RGB re-apply hang
+        off that event, so both silently did nothing -- one missed signal, two
+        subsystems broken, and nothing in the log to say why.
+
+        CLOCK_MONOTONIC does not advance while suspended and the wall clock
+        does, so the difference between the two deltas IS the time spent
+        asleep. That needs no kernel counter and works identically for suspend
+        and hibernate.
+
+        The event is emitted rather than just handled locally, because the aura
+        driver's own resume re-apply listens for exactly this and cannot see
+        our internal flag. hhd dispatches emitted events to every plugin's
+        notify(), so one detector serves both. A duplicate -- when hhd's own
+        detection did work -- is harmless: both handlers are idempotent.
+        """
+        now_wall, now_mono = time.time(), time.monotonic()
+        prev_wall, prev_mono = self._last_wall, self._last_mono
+        self._last_wall, self._last_mono = now_wall, now_mono
+        if prev_wall is None:
+            return
+        slept = (now_wall - prev_wall) - (now_mono - prev_mono)
+        if slept < SLEEP_GAP_S:
+            return
+        logger.info(f"Detected {slept:.0f}s asleep that hhd did not report; "
+                    f"re-evaluating")
+        self._recheck = True
+        if self.emit:
+            try:
+                self.emit({"type": "special", "event": "wakeup"})
+            except Exception as e:
+                logger.warning(f"Could not emit wakeup: {e}")
 
     def notify(self, events):
         """Watch for a resume.
@@ -360,6 +411,9 @@ class Z13TdpPlugin(HHDPlugin):
             # not -- observed once as "prepare failed: 'boost'" right after a
             # restart. Caught and logged rather than fatal, but a resume is
             # exactly when that window is hit, so it is guarded instead.
+            # Before the key guard: a sleep must be noticed even on a tick
+            # where the settings tree is mid-rebuild and we would return early.
+            self._detect_sleep()
             if any(k not in conf for k in (MODE_PATH, CUSTOM_TDP, CUSTOM_BOOST)):
                 return
             self._hold_choice(conf)

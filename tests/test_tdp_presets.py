@@ -329,10 +329,31 @@ ok(c[t.MODE_PATH].to(str) == before, "an unreadable charger changes nothing")
 # Measured on hardware: z13_p1 selected on unplug, 40 W (quiet's wattage)
 # applied two seconds later, and the QAM showing Silent.
 class _Clock:
+    """Fake clock. `wall` tracks `now` unless a test deliberately desyncs them.
+
+    Both are needed: _detect_sleep() compares the wall delta against the
+    monotonic delta, because CLOCK_MONOTONIC does not advance while suspended.
+    Keeping them equal here means advancing the clock in a test never looks
+    like a sleep -- a test that wants to simulate one moves `wall` alone.
+    """
+
     now = 1000.0
+    wall = 1000.0
 
     def monotonic(self):
         return self.now
+
+    def time(self):
+        return self.wall
+
+    def advance(self, secs):
+        """Normal time passing: both clocks move together."""
+        self.now += secs
+        self.wall += secs
+
+    def sleep_for(self, secs):
+        """Simulate `secs` spent suspended: wall advances, monotonic does not."""
+        self.wall += secs
 
 
 clock = _Clock()
@@ -349,14 +370,14 @@ p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_p2", "unplugging selects the battery preset")
 
 c[t.MODE_PATH] = "quiet"          # what adjustor's ppd handler does to us
-clock.now += 2                    # the measured delay
+clock.advance(2)                    # the measured delay
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_p2",
    f"a ppd change during the transition is overridden ({c[t.MODE_PATH].to(str)})")
 ok(c[t.CUSTOM_TDP].to(int) == 9, "and the preset's own values are restored with it")
 
 # ...but only for the window. A profile picked later is a real choice.
-clock.now += t.HOLD_S + 1
+clock.advance(t.HOLD_S + 1)
 c[t.MODE_PATH] = "quiet"
 p.prepare(c)
 p.prepare(c)
@@ -366,15 +387,15 @@ ok(c[t.MODE_PATH].to(str) == "quiet",
 # The hold arms even when the mode is ALREADY the target -- the overwrite
 # lands seconds later, so arming only on a change leaves the common case
 # (unplugging while already on the battery preset) unprotected.
-clock.now += 100
+clock.advance(100)
 with_ac(True)
 p.prepare(c)
-clock.now += 100
+clock.advance(100)
 with_ac(False)
 c[t.MODE_PATH] = "z13_p2"
 p.prepare(c)
 c[t.MODE_PATH] = "balanced"
-clock.now += 2
+clock.advance(2)
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_p2",
    f"the hold arms with no mode change to make ({c[t.MODE_PATH].to(str)})")
@@ -404,7 +425,7 @@ ok(c2[t.MODE_PATH].to(str) == "quiet", "and the mode is left where it was")
 # was, so a charger moved while the machine was OFF produces no transition.
 # Observed after a hibernate: on battery, dc_preset set, and the mode still
 # whatever was selected beforehand.
-clock.now += 100
+clock.advance(100)
 store([{"tdp": 45, "boost": True, "sppt": 56, "fppt": 64},
        {"tdp": 9, "boost": True, "sppt": 11, "fppt": 13}])
 p = plugin()
@@ -417,7 +438,7 @@ p.prepare(c)                      # boot: armed, so this applies dc_preset
 # HOLD_S: the boot arm goes through the same path as a resume and takes the
 # longer hold, because a desktop's power stack settles far more slowly after
 # waking than after an unplug.
-clock.now += t.RESUME_HOLD_S + 1
+clock.advance(t.RESUME_HOLD_S + 1)
 c[t.MODE_PATH] = "balanced"
 c[t.CUSTOM_TDP] = 45
 p.prepare(c)
@@ -441,7 +462,7 @@ ok(t.RESUME_HOLD_S > t.HOLD_S,
    f"the desktop rewrote its profile 18s after a measured resume")
 
 # One re-evaluation per resume, not a permanent loss of edge-triggering.
-clock.now += t.RESUME_HOLD_S + 1
+clock.advance(t.RESUME_HOLD_S + 1)
 c[t.MODE_PATH] = "balanced"
 p.prepare(c)
 p.prepare(c)
@@ -450,10 +471,43 @@ ok(c[t.MODE_PATH].to(str) == "balanced",
 
 # Unrelated events must not trigger it.
 p.notify([{"type": "special", "event": "something_else"}, {"type": "ppd"}])
-clock.now += t.RESUME_HOLD_S + 1
+clock.advance(t.RESUME_HOLD_S + 1)
 c[t.MODE_PATH] = "balanced"
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "balanced", "other events do not force a re-evaluation")
+
+# --- a sleep hhd never reported -------------------------------------------
+# hhd detects a wake from /sys/power/wakeup_count, and across a HIBERNATE the
+# kernel is restored from the image with that counter as it was, so the change
+# it watches for never happens. Observed: a hibernate resumed with hhd alive
+# and ticking and NO wakeup event at all -- which silently disabled both the
+# TDP re-apply and the RGB re-apply, since both hang off that one event.
+#
+# CLOCK_MONOTONIC does not advance while suspended and the wall clock does, so
+# the gap between the two deltas is the sleep, with no kernel counter involved.
+clock.advance(t.RESUME_HOLD_S + 1)
+c[t.MODE_PATH] = "balanced"
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "balanced", "steady state before the sleep")
+
+p.events.clear()
+clock.sleep_for(120)          # wall jumps, monotonic does not
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p2",
+   f"a sleep hhd never reported is detected and acted on ({c[t.MODE_PATH].to(str)})")
+ok({"type": "special", "event": "wakeup"} in p.events,
+   f"and a wakeup is emitted for the other plugins ({p.events})")
+
+# Normal time passing must NOT look like a sleep, or the policy would re-assert
+# on every tick and lock the user out exactly as continuous ownership did.
+p.events.clear()
+clock.advance(t.RESUME_HOLD_S + 1)
+c[t.MODE_PATH] = "quiet"
+p.prepare(c)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "quiet",
+   f"ordinary ticks are not mistaken for a sleep ({c[t.MODE_PATH].to(str)})")
+ok(not p.events, f"and emit nothing ({p.events})")
 
 # A rebuild is fatal to an unpatched adjustor -- it clears tdp_ready, which
 # has no default, and adjustor only ever sets it once behind a latched
