@@ -81,6 +81,7 @@ MARK_AC = "z13-ac-backport"
 # Sharing the mark would make the patcher's own --check labels lie.
 MARK_TDP = "z13-tdp-presets"
 MARK_AURA = "z13-aura-wake"
+MARK_BATTERY = "z13-battery-wake"
 
 
 def find_overlay_dir():
@@ -149,6 +150,20 @@ def find_aura():
     )
     if not hits:
         sys.exit("ERROR: hhd aura driver not found (is hhd installed?)")
+    return hits[-1]
+
+
+def find_adjustor_battery():
+    """adjustor's battery driver, which owns charge_control_end_threshold.
+
+    Part of the `hhd` package like every other target here, so the existing
+    pacman hook re-applies this on an hhd upgrade with no extra wiring.
+    """
+    hits = sorted(
+        glob.glob("/usr/lib/python3*/site-packages/adjustor/drivers/battery/__init__.py")
+    )
+    if not hits:
+        sys.exit("ERROR: adjustor battery driver not found (is adjustor installed?)")
     return hits[-1]
 
 
@@ -1140,6 +1155,57 @@ AURA_PATCHES = (
 )
 
 
+# Re-apply the battery charge limit after a resume.
+#
+# THE SYMPTOM: charge_control_end_threshold is set to 80%, and after a
+# HIBERNATE the battery charges past it -- observed continuing above 80%.
+#
+# adjustor's battery driver writes the threshold in exactly two situations:
+# once at open() (process startup) via self.startup, and whenever the
+# CONFIGURED value changes (`lim != self.charge_limit_prev`). Neither fires on
+# a resume. hhd is not restarted by a hibernate, so open() does not run again
+# and self.startup is never True a second time; and the config value itself
+# does not change across a hibernate -- it is still "p80" before and after --
+# so the change-detection branch sees no difference and does nothing either.
+#
+# The threshold is an EC-side setting, and this machine's hibernate mode is
+# `shutdown` (a real power-off, not ACPI S4 -- see hibernate-hook.sh), which
+# power-cycles the EC. If that reset the threshold to unrestricted, nothing
+# in this driver would ever notice: its cached charge_limit_prev still reads
+# "p80", so as far as it knows nothing needs to be done, even though the
+# hardware has silently reverted.
+#
+# The fix mirrors the aura wake-reinit entry: on the wakeup event, drop the
+# cached value that suppresses the re-write, and let the driver's own
+# debounced apply path (APPLY_DELAY, already in the file) take it from there.
+# No immediate write here, no new write path -- just stop the driver from
+# believing a resume is a no-op.
+ADJUSTOR_BATTERY_PATCHES = (
+    (
+        "wakeup-recharge",
+        "    def update(self, conf: Config):\n"
+        '        self.enabled = self.always_enable or conf.get("hhd.settings.tdp_ready", False)\n',
+        """\
+    def notify(self, events):
+        # {mark}: a resume does not change the CONFIGURED charge limit, so the
+        # change-detection below has nothing to compare against and never
+        # re-applies it -- even if the EC's own threshold was reset by the
+        # power cycle a hibernate performs. Invalidate the cached value here;
+        # update()'s existing debounced apply path does the actual write.
+        for ev in events:
+            if ev.get("type") == "special" and ev.get("event") == "wakeup":
+                self.charge_limit_prev = None
+                self.charge_bypass_prev = None
+
+    def update(self, conf: Config):
+        self.enabled = self.always_enable or conf.get("hhd.settings.tdp_ready", False)
+""",
+        "self.charge_limit_prev = None\n                self.charge_bypass_prev = None",
+        "replace",
+    ),
+)
+
+
 def main():
     d = find_overlay_dir()
     a_gpu = find_adjustor_gpu()
@@ -1148,9 +1214,10 @@ def main():
     a_asus = find_adjustor_asus()
     a_init = find_adjustor_hhd()
     a_aura = find_aura()
+    a_batt = find_adjustor_battery()
     # Membership here is what gives a file backup(), revert() and the
     # pycache purge for free -- all three already iterate this tuple.
-    adj = (a_gpu, a_fuse, a_utils, a_asus, a_init, a_aura)
+    adj = (a_gpu, a_fuse, a_utils, a_asus, a_init, a_aura, a_batt)
     mode = sys.argv[1] if len(sys.argv) > 1 else "--apply"
 
     if mode == "--check":
@@ -1176,6 +1243,7 @@ def main():
         print(f"  {'adjustor/asus':14s} {'tdp-presets':12s} {marked_state(a_asus, ADJUSTOR_ASUS_PATCHES)}")
         print(f"  {'adjustor/hhd.py':14s} {'tdp-presets':12s} {marked_state(a_init, ADJUSTOR_INIT_PATCHES)}")
         print(f"  {'aura/__init__':14s} {'wake-reinit':12s} {marked_state(a_aura, AURA_PATCHES)}")
+        print(f"  {'adjustor/batt':14s} {'wake-recharge':12s} {marked_state(a_batt, ADJUSTOR_BATTERY_PATCHES)}")
         return
 
     if mode == "--revert":
@@ -1202,6 +1270,7 @@ def main():
         ("adjustor/asus", lambda p: apply_marked(p, ADJUSTOR_ASUS_PATCHES, MARK_TDP), a_asus),
         ("adjustor/hhd.py", lambda p: apply_marked(p, ADJUSTOR_INIT_PATCHES, MARK_TDP), a_init),
         ("aura/__init__", lambda p: apply_marked(p, AURA_PATCHES, MARK_AURA), a_aura),
+        ("adjustor/batt", lambda p: apply_marked(p, ADJUSTOR_BATTERY_PATCHES, MARK_BATTERY), a_batt),
     ):
         ok, msg = fn(arg)
         results.append((name, ok, msg))
