@@ -244,6 +244,38 @@ ok(c[t.CUSTOM_TDP].to(int) == 60,
 ok(presets_on_disk()[0]["tdp"] == 9,
    "while the saved preset itself is never rewritten")
 
+# The fork must survive a hold armed on the preset it just left. This is the
+# bug reported as "hard locked to 9W" recurring through a DIFFERENT mechanism
+# than the one already fixed for it: _hold_choice() runs before _sync() every
+# tick, and while a hold is armed it re-asserts its target the instant
+# conf[MODE_PATH] no longer reads as that target -- which is exactly what a
+# fork to Custom looks like from _hold_choice's side. Edit the slider inside a
+# 15s/60s post-transition window and, without this fix, the fork survives the
+# tick that makes it but is snapped straight back on the very next one.
+#
+# power="enabled" with a STABLE _on_ac() is deliberate, not power="disabled"
+# (the default): _power_change's disabled branch unconditionally clears
+# self._hold on every tick as a side effect of its own re-arm logic, which
+# would make this test pass regardless of whether the fork branch's own fix
+# is present -- caught exactly that way, by first writing this test with the
+# default and watching it pass even with the fix reverted.
+t._on_ac = lambda: True
+p2 = plugin()
+c2 = mkconf(mode="z13_p1", tdp=9, power="enabled", ac="z13_p1", presets=1)
+p2.prepare(c2)   # first tick: adopts old_ac, consumes the boot _recheck
+p2._hold = ("z13_p1", t.time.monotonic() + 1000)  # a transition just armed it
+c2[t.CUSTOM_TDP] = 60
+p2.prepare(c2)
+ok(c2[t.MODE_PATH].to(str) == "custom",
+   f"the fork happens on the same tick even with a hold armed ({c2[t.MODE_PATH].to(str)})")
+ok(p2._hold is None,
+   f"and clears the hold -- nothing is left for it to protect ({p2._hold})")
+p2.prepare(c2)
+p2.prepare(c2)
+ok(c2[t.MODE_PATH].to(str) == "custom",
+   f"so the fork survives later ticks instead of snapping back ({c2[t.MODE_PATH].to(str)})")
+ok(c2[t.CUSTOM_TDP].to(int) == 60, "with the dialled-in value still in place")
+
 # The preset is still applied when it is SELECTED -- that is the difference
 # between choosing one and editing one.
 c[t.MODE_PATH] = "z13_p1"
@@ -265,10 +297,17 @@ ok(c[t.CUSTOM_TDP].to(int) == 9, "with its value still in place")
 # from -- validate_config would otherwise reset the mode to adjustor's default.
 p = plugin()
 c = mkconf(mode="z13_p1", presets=1)
+p._hold = ("z13_p1", t.time.monotonic() + 1000)   # a transition just armed it
 c["tdp.asus.tdp_v2.z13_p1.remove"] = True
 p.update(c)
 ok(presets_on_disk() == [], "Remove deletes the preset")
 ok(c[t.MODE_PATH].to(str) == "custom", f"and returns to Custom ({c[t.MODE_PATH].to(str)})")
+# Same fix as the fork-to-Custom case above, same reason: without it,
+# _hold_choice's next tick would see mode="custom" != the removed id and
+# call _apply_preset() on a preset that no longer exists -- harmless in
+# _apply_preset itself (it returns None), but only after _hold_choice has
+# already rewritten conf[MODE_PATH] back to that now-nonexistent id.
+ok(p._hold is None, f"and clears the hold on the id that no longer exists ({p._hold})")
 
 
 # ==========================================================================
