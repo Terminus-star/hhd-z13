@@ -75,6 +75,24 @@ MAX_PRESETS = 8
 # stop, so a profile picked by hand a moment later still wins.
 HOLD_S = 15.0
 
+# A RESUME needs a much longer one, and the reason is not symmetry with the
+# above -- it is that the two events have different tails.
+#
+# An unplug's aftershock is one desktop reacting to one transition, and it
+# lands within a second or two. A resume restarts the desktop's whole power
+# stack: powerdevil re-reads the battery, re-evaluates its profile and writes
+# it, and that can arrive long after hhd has finished its own resume work.
+#
+# Measured on this machine after a hibernate: our policy applied the battery
+# preset at T+0.0 and it held, then at T+18.0 -- three seconds after the 15s
+# hold lapsed -- the desktop wrote its profile and adjustor took the mode to
+# balanced at 45 W, with nothing left to correct it.
+#
+# 60s covers that with margin and still ends, so a mode picked by hand a
+# minute after waking is still the user's to pick. It is a bounded window
+# sized to an observed phenomenon, not a guess that bigger is safer.
+RESUME_HOLD_S = 60.0
+
 # NOT /etc/hhd: hhd watches that directory and reloads its whole configuration
 # on any write there. See the module docstring.
 STORE_PATH = "/var/lib/hhd-z13/presets.json"
@@ -503,10 +521,11 @@ class Z13TdpPlugin(HHDPlugin):
         target = conf.get(f"{POWER}.enabled.{key}", "")
         if target in STOCK_MODES or self._preset(target) is not None:
             logger.info(f"Power source -> {'AC' if ac else 'battery'}: {target}")
+            hold = RESUME_HOLD_S if recheck else HOLD_S
             # Armed even when the mode is ALREADY the target: the overwrite
             # lands seconds later, so arming only on a change would leave the
             # common case unprotected.
-            self._hold = (target, time.monotonic() + HOLD_S)
+            self._hold = (target, time.monotonic() + hold)
             conf[MODE_PATH] = target
             if target in STOCK_MODES:
                 self.old_state = None
