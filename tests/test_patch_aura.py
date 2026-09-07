@@ -7,11 +7,14 @@ the result away. Nothing is written, so this is safe to run on the machine
 that is misbehaving.
 
 WHAT THIS GUARDS
-    The keyboard and lightbar came back from every resume a flat green and
-    stayed there. Two writers and a change-gate:
+    The keyboard and lightbar came back from every resume showing one flat
+    colour and stayed there. A writer that paints all zones alike, plus a
+    change-gate:
 
-      - z13ctl-plus's daemon restores its own saved lighting on resume, one
-        mode for all zones, whatever colour it last held.
+      - Something writes the hardware across a resume. Originally the
+        z13ctl-plus daemon restoring its saved lighting; now that it is gone,
+        the sleep hooks' own completion signals, which are equally one colour
+        for both zones. Removing the daemon did NOT remove the need for this.
       - hhd's aura driver holds the real per-device config but update() skips
         a device whose config has not changed. Sleep changes nothing, so hhd
         sends nothing and never corrects the hardware.

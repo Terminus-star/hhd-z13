@@ -1024,16 +1024,25 @@ def revert(d, adj):
 
 # Re-assert the RGB configuration after a resume.
 #
-# THE SYMPTOM: the keyboard and lightbar come back from sleep a flat green and
-# stay there, never returning to the configured rainbow/cycle. Not a fault in
-# any one component -- the outcome of two writers and a change-gate:
+# THE SYMPTOM: the keyboard and lightbar come back from sleep showing one flat
+# colour and stay there, never returning to their configured per-device modes.
 #
-#   1. z13ctl-plus's daemon restores its own saved lighting on every resume
-#      (`resume: lighting restored zone=all mode=static`). That saved value is
-#      a single mode for all zones, and whatever colour it last held is what
-#      the hardware gets.
+# THIS ENTRY OUTLIVED ITS ORIGINAL CAUSE -- DO NOT DELETE IT AS OBSOLETE.
+# It was written to correct the z13ctl-plus daemon, which repainted its own
+# saved lighting on every resume. That daemon is gone now, but the entry
+# matters MORE rather than less, because the sleep hooks legitimately paint
+# transient signals across a resume -- a green "hibernate complete" flash in
+# resume-hook.sh and post-resume-hook.sh -- and those are single colours
+# written to both zones. Something has to hand the LEDs back afterwards, and
+# hhd is the only thing that knows the per-device configuration. Without this
+# entry those transient signals are permanent.
+#
+# The underlying reason hhd does not do it already is a change-gate:
+#
+#   1. Something writes the hardware across a resume -- formerly the daemon,
+#      now a hook's completion signal -- and it is one colour for all zones.
 #   2. hhd's aura driver holds the REAL per-device configuration -- lightbar
-#      on cycle, keyboard on rainbow -- but update() skips any device whose
+#      on one mode, keyboard on another -- but update() skips any device whose
 #      config has not changed:
 #          if k in self.prev_cfg and data == self.prev_cfg[k] and not init:
 #              continue
@@ -1043,7 +1052,9 @@ def revert(d, adj):
 #
 # Note which way round this is. hhd is not losing a fight, it is not turning
 # up at all -- so a later write, a longer delay or a retry would change
-# nothing. The device has to be marked dirty.
+# nothing. The device has to be marked dirty. That is also why removing the
+# other writer did not fix this on its own: with nothing painting over hhd,
+# the LEDs simply keep whatever the last hook wrote.
 #
 # Upstream has the fix and it is COMMENTED OUT, in this very function:
 #
