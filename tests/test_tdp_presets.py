@@ -278,7 +278,17 @@ p = plugin()
 c = mkconf(mode="custom", power="enabled", ac="z13_p1", dc="z13_p2", presets=2)
 with_ac(True)
 p.prepare(c)
-ok(c[t.MODE_PATH].to(str) == "custom", "first tick adopts the power source only")
+# The first tick APPLIES. A boot is a power change nobody watched -- shut
+# down on battery, started plugged in -- so there is no edge to act on and
+# an adopt-only first tick would sit on the wrong preset until the next
+# unplug. Same reasoning as the resume case further down.
+ok(c[t.MODE_PATH].to(str) == "z13_p1",
+   f"the first tick applies the preset for the live source ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 45, "with that preset's wattage")
+# The fake clock is not installed until further down, so the boot apply's
+# hold cannot be waited out here. Drop it by hand: this block is about the
+# edge logic, and the hold has its own tests below.
+p._hold = None
 with_ac(False)
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "z13_p2", f"unplugging selects the preset ({c[t.MODE_PATH].to(str)})")
@@ -353,6 +363,17 @@ c2 = mkconf(mode="custom", power="disabled", presets=2)
 p2._hold = ("z13_p1", clock.now + 100)
 p2.prepare(c2)
 ok(p2._hold is None, "disabling the policy drops the hold")
+ok(p2._recheck is False, "and the boot arm, so enabling it later does not fire")
+
+# With the policy off, a resume must not queue an apply either -- otherwise
+# switching the policy back on days later would yank the mode as its first
+# act, which reads as the setting doing something it was never asked to do.
+p2.notify([{"type": "special", "event": "wakeup"}])
+p2.prepare(c2)
+ok(p2._recheck is False, "a resume while disabled queues nothing")
+c2[t.MODE_PATH] = "quiet"
+p2.prepare(c2)
+ok(c2[t.MODE_PATH].to(str) == "quiet", "and the mode is left where it was")
 
 
 # --- a resume re-evaluates, with no edge to trigger on ---------------------
@@ -366,7 +387,14 @@ store([{"tdp": 45, "boost": True, "sppt": 56, "fppt": 64},
 p = plugin()
 c = mkconf(mode="balanced", power="enabled", ac="balanced", dc="z13_p2", presets=2)
 with_ac(False)
-p.prepare(c)                      # first tick adopts: battery, no action
+p.prepare(c)                      # boot: armed, so this applies dc_preset
+# Past the boot apply and its hold, the policy is edge-triggered again. Pick
+# a mode by hand and give it a wattage the preset would overwrite, so the
+# resume below has something to actually restore.
+clock.now += t.HOLD_S + 1
+c[t.MODE_PATH] = "balanced"
+c[t.CUSTOM_TDP] = 45
+p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "balanced", "steady state leaves the mode alone")
 p.prepare(c)
 ok(c[t.MODE_PATH].to(str) == "balanced", "and keeps leaving it alone — no edge")

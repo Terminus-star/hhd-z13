@@ -181,9 +181,17 @@ class Z13TdpPlugin(HHDPlugin):
         self._gen_boost = True     # boost value the current tree was built for
         self._gen_n = 0            # preset count the current tree was built for
 
-        self.old_ac = None         # None = first tick adopts, never applies
+        self.old_ac = None         # None = no previous source to compare to
         self._hold = None          # (mode, deadline) while a transition settles
-        self._recheck = False      # re-evaluate the policy without an edge
+        # Start ARMED. A fresh boot is a power change nobody watched, exactly
+        # like the hibernate case notify() exists for: the machine can be shut
+        # down on AC and started on battery, and the mode restored from
+        # state.yml is whatever the previous session ended on. There is no
+        # edge, so an adopt-only first tick would leave the wrong preset in
+        # place until the next unplug -- the same symptom, reached by booting
+        # instead of resuming. Arming here makes the first tick re-evaluate
+        # against the CURRENT source, through the resume path below.
+        self._recheck = True
         self.old_state = None      # (mode, watts, boost, sppt, fppt)
         self.old_applied = None    # last telemetry string written
         self._patched = None
@@ -441,6 +449,11 @@ class Z13TdpPlugin(HHDPlugin):
             # rather than firing a stale edge from before it was off.
             self.old_ac = None
             self._hold = None
+            # Drop a pending re-evaluation too. With the policy off, a boot or
+            # a resume must not leave an apply queued that fires the instant
+            # it is switched back on. Enabling adopts the current source; the
+            # next real transition is what acts.
+            self._recheck = False
             return
         ac = _on_ac()
         if ac is None:
