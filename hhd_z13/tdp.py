@@ -217,6 +217,21 @@ class Z13TdpPlugin(HHDPlugin):
 
     def open(self, emit, context, *args, **kwargs):
         self.emit = emit
+        # Stamp the behaviour into the journal at startup.
+        #
+        # This exists because "I merged but nothing changed" has been the wrong
+        # diagnosis three times in a row. The editable install makes the FILE
+        # live immediately; the running process keeps whatever it imported at
+        # startup, so an un-restarted hhd runs old code from a new file and the
+        # only visible difference is behaviour.
+        #
+        # A line naming the values actually in force settles it from outside
+        # the process, in one grep, without reasoning about mtimes:
+        #     journalctl -u hhd@$USER | grep "Z13T.*policy:"
+        logger.info(
+            f"policy: edge-triggered, hold {HOLD_S:.0f}s "
+            f"(resume {RESUME_HOLD_S:.0f}s), store {STORE_PATH}"
+        )
 
     def notify(self, events):
         """Watch for a resume.
