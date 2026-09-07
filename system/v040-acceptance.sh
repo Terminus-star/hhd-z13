@@ -383,8 +383,16 @@ cat <<'EOF'
 
   C. Enable "Preset on Power Change", unplug, replug.
      -> the mode follows. Then pick a DIFFERENT mode by hand and wait:
-        it must STAY until the next plug/unplug. Edge-triggered, not
-        continuous, is the whole contract.
+        it must SNAP BACK within ~2s. While the policy is enabled it owns
+        the TDP mode outright and re-asserts it every tick -- that is the
+        whole contract, and it is what stops KDE's own profile switch from
+        landing on top of a preset seconds after an unplug.
+     -> Now DISABLE the policy and pick a mode by hand: it must stay.
+        That is the escape hatch, and the only way to hold a mode the
+        policy is not pointing at.
+     -> `journalctl -fu hhd@$USER | grep "TDP mode ->"` is the diagnostic:
+        one line per unplug is correct. A line every ~2s means something
+        else is writing the mode and losing the fight -- worth chasing.
 
   D. Suspend, wait 30s, resume.   *** THE GATE FOR system/v040-tdp.sh ***
      -> "Waking up from sleep, resetting TDP after 4 seconds." followed
