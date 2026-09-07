@@ -393,13 +393,40 @@ class Z13TdpPlugin(HHDPlugin):
         old_mode, old_w, old_b, _, _ = self.old_state
 
         if mode.startswith(PRESET_PREFIX):
-            # A saved preset is immutable: whenever it is selected, or
-            # anything drifts while it is, put its own values back.
-            if mode != old_mode or (watts, boost) != (old_w, old_b):
+            if mode != old_mode:
+                # Newly selected: apply the preset's own values. Returns
+                # immediately -- _apply_preset sets old_state to the values it
+                # just wrote, and falling through would overwrite that with
+                # the pre-apply snapshot, so the very next tick would see a
+                # difference and fork to Custom on its own.
                 self._apply_preset(conf, mode)
+                return
+            elif (watts, boost) != (old_w, old_b):
+                # Edited in place. This used to put the preset's values back,
+                # which made the TDP slider look BROKEN: drag it while a
+                # preset is selected and the number snaps back with nothing
+                # said. Reported as "TDP is unresponsive, hard locked to 9W".
+                #
+                # Immutability was the right instinct -- a preset the user can
+                # silently redefine by brushing a slider is not a saved
+                # configuration -- but reverting is the wrong way to enforce
+                # it. Fork to Custom instead, carrying the value they just
+                # dialled in: the preset on disk stays exactly as saved, and
+                # the edit does what they plainly meant it to do.
+                #
+                # Falls THROUGH to the Custom handling below rather than
+                # returning. Clearing old_state instead would make the next
+                # tick take the first-tick adopt path, and a preset selected
+                # before that tick would then be adopted rather than applied
+                # -- the slider would work but choosing a preset would not.
+                # Falling through also recomputes PL2/PL3 for the new PL1 in
+                # this same tick, so the panel is never briefly inconsistent.
+                logger.info(f"Edited while on {mode}; switching to Custom at {watts}W")
+                conf[MODE_PATH] = "custom"
+                mode = "custom"
             else:
                 self.old_state = cur
-            return
+                return
 
         if mode != "custom":
             # A stock profile. adjustor owns it outright; publish nothing so
