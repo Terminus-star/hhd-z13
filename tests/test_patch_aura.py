@@ -60,17 +60,28 @@ except SystemExit:
 src = open(path).read()
 label, anchor, body, sentinel, mode = m.AURA_PATCHES[0]
 
-ok(src.count(anchor) == 1,
-   f"the anchor is unique in the installed driver ({src.count(anchor)})")
+# Once the patch is installed the anchor is GONE -- that is success, not
+# failure. So the two states are checked differently: an unpatched file must
+# still accept the substitution, and a patched one is verified on its result.
+# The earlier version of this test asserted the anchor unconditionally and
+# started failing the moment the patch it tests was actually applied.
+patched_already = m.MARK_AURA in src
 
-# An already-patched file is the normal steady state on this machine, so the
-# substitution is exercised against a pristine copy either way.
-clean = src
-if m.MARK_AURA in src:
-    print("  note: installed file is already patched; testing the table itself")
+if patched_already:
+    print("  note: installed driver is already patched; verifying the result")
+    ok(src.count(anchor) == 0,
+       "the anchor is consumed once the patch is applied")
+    out = src
+else:
+    ok(src.count(anchor) == 1,
+       f"the anchor is unique in the unpatched driver ({src.count(anchor)})")
+    out = src.replace(anchor, body.format(mark=m.MARK_AURA))
+    ok(out != src, "the substitution applies")
 
-out = clean.replace(anchor, body.format(mark=m.MARK_AURA))
-ok(out != clean, "the substitution applies")
+    # Re-applying must not double the body. apply_marked skips on the
+    # sentinel, but the table itself should be idempotent under replace().
+    ok(out.replace(anchor, body.format(mark=m.MARK_AURA)) == out,
+       "a second application changes nothing")
 ok(m.MARK_AURA in out, "and leaves the mark, so --check can see it")
 ok(sentinel in out, "and the sentinel apply_marked tests for")
 
