@@ -80,6 +80,7 @@ MARK_AC = "z13-ac-backport"
 # v0.4.0 hands TDP ownership back to it rather than growing a second writer.
 # Sharing the mark would make the patcher's own --check labels lie.
 MARK_TDP = "z13-tdp-presets"
+MARK_AURA = "z13-aura-wake"
 
 
 def find_overlay_dir():
@@ -134,6 +135,20 @@ def find_adjustor_hhd():
     hits = sorted(glob.glob("/usr/lib/python3*/site-packages/adjustor/hhd.py"))
     if not hits:
         sys.exit("ERROR: adjustor/hhd.py not found (is adjustor installed?)")
+    return hits[-1]
+
+
+def find_aura():
+    """hhd's ASUS Aura RGB driver, which owns the keyboard and lightbar.
+
+    Part of the `hhd` package like every other target here, so the existing
+    pacman hook re-applies this on an hhd upgrade with no extra wiring.
+    """
+    hits = sorted(
+        glob.glob("/usr/lib/python3*/site-packages/hhd/device/aura/__init__.py")
+    )
+    if not hits:
+        sys.exit("ERROR: hhd aura driver not found (is hhd installed?)")
     return hits[-1]
 
 
@@ -1007,6 +1022,86 @@ def revert(d, adj):
     return n
 
 
+# Re-assert the RGB configuration after a resume.
+#
+# THE SYMPTOM: the keyboard and lightbar come back from sleep showing one flat
+# colour and stay there, never returning to their configured per-device modes.
+#
+# THIS ENTRY OUTLIVED ITS ORIGINAL CAUSE -- DO NOT DELETE IT AS OBSOLETE.
+# It was written to correct the z13ctl-plus daemon, which repainted its own
+# saved lighting on every resume. That daemon is gone now, but the entry
+# matters MORE rather than less, because the sleep hooks legitimately paint
+# transient signals across a resume -- a green "hibernate complete" flash in
+# resume-hook.sh and post-resume-hook.sh -- and those are single colours
+# written to both zones. Something has to hand the LEDs back afterwards, and
+# hhd is the only thing that knows the per-device configuration. Without this
+# entry those transient signals are permanent.
+#
+# The underlying reason hhd does not do it already is a change-gate:
+#
+#   1. Something writes the hardware across a resume -- formerly the daemon,
+#      now a hook's completion signal -- and it is one colour for all zones.
+#   2. hhd's aura driver holds the REAL per-device configuration -- lightbar
+#      on one mode, keyboard on another -- but update() skips any device whose
+#      config has not changed:
+#          if k in self.prev_cfg and data == self.prev_cfg[k] and not init:
+#              continue
+#      Sleep does not change the config, so after a resume hhd's idea of the
+#      lighting matches what it last wrote and it sends nothing. The hardware
+#      is green; hhd believes it is rainbow; nobody corrects it.
+#
+# Note which way round this is. hhd is not losing a fight, it is not turning
+# up at all -- so a later write, a longer delay or a retry would change
+# nothing. The device has to be marked dirty. That is also why removing the
+# other writer did not fix this on its own: with nothing painting over hhd,
+# the LEDs simply keep whatever the last hook wrote.
+#
+# Upstream has the fix and it is COMMENTED OUT, in this very function:
+#
+#       # case "wakeup":
+#       #     for d in self.devices.values():
+#       #         if d["disabled"]:
+#       #             continue
+#       #         d['init'] = True
+#
+# Uncommenting it in place would not work here, and that is worth recording:
+# it sits inside the `match` below `if not self.tdp_changes: return`, and
+# tdp_changes is off by default (it is the "flash the keyboard on a TDP
+# change" option). The guard returns before the match is ever reached. So the
+# block goes ABOVE the guard instead, where a resume reaches it whatever that
+# option is set to.
+#
+# Setting init=True routes the device through update()'s own startup path,
+# which re-runs the handshake and rewrites the full per-device configuration
+# -- the same code that paints the LEDs correctly when hhd starts. hhd detects
+# a wake by polling /sys/power/wakeup_count, so the correction lands about a
+# poll after resume, i.e. after z13ctl-plus's restore rather than racing it.
+AURA_PATCHES = (
+    (
+        "wakeup-reinit",
+        "    def notify(self, events):\n        if not self.tdp_changes:\n            return\n",
+        """\
+    def notify(self, events):
+        # {mark}: mark every device dirty on resume so update() rewrites the
+        # configured mode. Deliberately placed BEFORE the tdp_changes guard
+        # below -- upstream's own version of this sits after it, inside the
+        # match, where it can only run for users who enabled an unrelated
+        # option. A resume has to reach it either way.
+        for ev in events:
+            if ev.get("type") == "special" and ev.get("event") == "wakeup":
+                for dev in self.devices.values():
+                    if not dev["disabled"]:
+                        dev["init"] = True
+
+        if not self.tdp_changes:
+            return
+""",
+        'ev.get("event") == "wakeup"',
+        "replace",
+    ),
+)
+
+
 def main():
     d = find_overlay_dir()
     a_gpu = find_adjustor_gpu()
@@ -1014,9 +1109,10 @@ def main():
     a_utils = find_hhd_utils()
     a_asus = find_adjustor_asus()
     a_init = find_adjustor_hhd()
+    a_aura = find_aura()
     # Membership here is what gives a file backup(), revert() and the
     # pycache purge for free -- all three already iterate this tuple.
-    adj = (a_gpu, a_fuse, a_utils, a_asus, a_init)
+    adj = (a_gpu, a_fuse, a_utils, a_asus, a_init, a_aura)
     mode = sys.argv[1] if len(sys.argv) > 1 else "--apply"
 
     if mode == "--check":
@@ -1041,6 +1137,7 @@ def main():
         # the label 'cpu-native', and this table is a different mark.
         print(f"  {'adjustor/asus':14s} {'tdp-presets':12s} {marked_state(a_asus, ADJUSTOR_ASUS_PATCHES)}")
         print(f"  {'adjustor/hhd.py':14s} {'tdp-presets':12s} {marked_state(a_init, ADJUSTOR_INIT_PATCHES)}")
+        print(f"  {'aura/__init__':14s} {'wake-reinit':12s} {marked_state(a_aura, AURA_PATCHES)}")
         return
 
     if mode == "--revert":
@@ -1066,6 +1163,7 @@ def main():
         ("hhd/utils.py", lambda p: apply_marked(p, UTILS_PATCHES, MARK_AC), a_utils),
         ("adjustor/asus", lambda p: apply_marked(p, ADJUSTOR_ASUS_PATCHES, MARK_TDP), a_asus),
         ("adjustor/hhd.py", lambda p: apply_marked(p, ADJUSTOR_INIT_PATCHES, MARK_TDP), a_init),
+        ("aura/__init__", lambda p: apply_marked(p, AURA_PATCHES, MARK_AURA), a_aura),
     ):
         ok, msg = fn(arg)
         results.append((name, ok, msg))

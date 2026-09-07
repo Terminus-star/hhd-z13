@@ -87,9 +87,18 @@ ok("non-essential" not in disp["children"]["status"].get("tags", []),
    f"refresh controls are essential, like their neighbours "
    f"({disp['children']['status'].get('tags')})")
 
-# --- apply logic, writes stubbed ------------------------------------------
+# --- apply logic, reads AND writes stubbed --------------------------------
+# The read has to be stubbed too, not just the write. Without it the first
+# tick adopts whatever the real hardware happens to hold, and the "user
+# change" below is only a change when boot_sound happens to be ON: with it off
+# the test sets False over an adopted False and correctly writes nothing, so
+# the assertion fails for a reason that has nothing to do with the code.
+#
+# Caught exactly that way -- the suite passed all day, then failed once
+# boot_sound was switched off in the QAM.
 wrote = []
 fw._write = lambda a, v: (wrote.append((a, v)), True)[1]
+fw._read = lambda a: True          # live value is ON for these cases
 
 conf = Config({"gamemode": {"z13_firmware": {"boot_sound": True}}})
 p = fw.Z13FirmwarePlugin()

@@ -74,6 +74,37 @@ It selects *which* preset to apply, so it has to be reachable from any mode —
 including the one KDE flips you to on unplug. It sits beside adjustor's TDP
 Mode selector rather than inside Custom.
 
+### ...and while enabled, it owns TDP Mode
+
+Not a suggestion applied at the transition: the single source of truth. While
+the policy is on, every tick asserts the preset matching the current charger
+state, so the mode selector follows it and anything that moves the mode is put
+back on the next tick.
+
+That is the whole point. Two things write this setting -- us on a power change,
+and KDE switching its own power profile, which adjustor maps onto a stock mode
+and force-writes after our `prepare()`. The first answer was a 15-second hold:
+re-assert the choice, then stop, so a mode picked by hand a moment later still
+won. It was a truce between two owners, and it lost every fight arriving on the
+16th second.
+
+Continuous assertion replaces four mechanisms with one. The edge detector, the
+hold, the resume arm and the boot arm all existed to answer *when may we act?*,
+and each had a blind spot: a charger moved during hibernate, a boot on the
+other source, an overwrite that was merely late. Asserting always deletes the
+question.
+
+**The cost, stated plainly:** a mode picked by hand is corrected within one
+poll (2 s). Nothing can distinguish a person clicking Silent from KDE writing
+it, so the policy overrules both. To choose a mode by hand, point the policy at
+it or turn the policy off -- with it off the plugin asserts nothing and the
+dropdown is adjustor's again, unchanged.
+
+The journal line is the diagnostic. `_power_policy` logs only on an actual
+correction, never in the steady state, so one line on an unplug is normal and a
+line every two seconds means something is persistently writing the mode and
+losing. It is deliberately not rate-limited.
+
 ## 2. Two corrections that reshaped this
 
 ### 2a. adjustor writes PPT only in `custom` mode
