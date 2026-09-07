@@ -231,12 +231,35 @@ ok((c[t.SPPT].to(int), c[t.FPPT].to(int)) == (11, 13), "including its limits")
 ok(json.load(open(t.STORE_PATH))["applied"] == {"sppt": 11, "fppt": 13},
    "and publishes them for the patch to read")
 
-# A saved preset is immutable: anything that drifts while it is selected is
-# put back, so it cannot be edited in place by accident.
+# Editing while a preset is selected forks to Custom rather than snapping
+# back. Reverting was the original behaviour and it made the slider look dead:
+# the number returned to the preset's value with nothing said, which is what
+# "TDP is unresponsive, hard locked to 9W" turned out to be.
 c[t.CUSTOM_TDP] = 60
 p.prepare(c)
-ok(c[t.CUSTOM_TDP].to(int) == 9, f"a saved preset restores its own value ({c[t.CUSTOM_TDP].to(int)})")
-ok(presets_on_disk()[0]["tdp"] == 9, "and is never overwritten")
+ok(c[t.MODE_PATH].to(str) == "custom",
+   f"editing a preset switches to Custom ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 60,
+   f"and keeps the value that was dialled in ({c[t.CUSTOM_TDP].to(int)})")
+ok(presets_on_disk()[0]["tdp"] == 9,
+   "while the saved preset itself is never rewritten")
+
+# The preset is still applied when it is SELECTED -- that is the difference
+# between choosing one and editing one.
+c[t.MODE_PATH] = "z13_p1"
+p.prepare(c)
+ok(c[t.CUSTOM_TDP].to(int) == 9,
+   f"selecting it again restores its value ({c[t.CUSTOM_TDP].to(int)})")
+
+# ...and STAYS selected. _apply_preset sets old_state to what it just wrote;
+# if the apply branch falls through, old_state is overwritten with the
+# pre-apply snapshot, the next tick sees a difference and forks to Custom on
+# its own. That bug survived the whole suite until this case existed.
+p.prepare(c)
+p.prepare(c)
+ok(c[t.MODE_PATH].to(str) == "z13_p1",
+   f"and does not drift off the preset on later ticks ({c[t.MODE_PATH].to(str)})")
+ok(c[t.CUSTOM_TDP].to(int) == 9, "with its value still in place")
 
 # Remove takes the preset away and lands on Custom, where the values came
 # from -- validate_config would otherwise reset the mode to adjustor's default.
