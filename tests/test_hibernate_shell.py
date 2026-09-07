@@ -106,6 +106,28 @@ if "hibernate-hook.sh" in texts:
     ok(pair is None,
        "the hook does not set brightness before colour (colour would override it)")
 
+# ── 6. the backlight is restored, not overwritten ─────────────────────────
+# restore_screen used to write a hardcoded 40% of max on EVERY resume. The
+# intent was rescuing a black panel, but it ran whether or not there was
+# anything to rescue, so a deliberate 15-20% became 40% after every wake.
+if "common.sh" in texts:
+    t = texts["common.sh"]
+    ok("snapshot_backlight()" in t, "snapshot_backlight() is defined")
+    ok('[ "$cur" -gt 0 ] && continue' in t,
+       "a surviving brightness is left alone")
+    # The 40% fallback may remain, but only INSIDE the dark-panel branch.
+    i_guard = t.find('[ "$cur" -gt 0 ] && continue')
+    i_40 = t.find("* 40 / 100")
+    ok(i_guard != -1 and i_40 != -1 and i_guard < i_40,
+       "the 40% fallback sits behind the dark-panel guard")
+    ok(t.count("* 40 / 100") == 1,
+       f"and appears exactly once ({t.count('* 40 / 100')})")
+
+for f, label in (("hibernate-hook.sh", "hibernate"),):
+    if f in texts:
+        ok("snapshot_backlight" in texts[f],
+           f"the {label} path snapshots the backlight before sleeping")
+
 print()
 print("  RESULT: " + ("ALL PASS" if not fail else f"{fail} FAILURE(S)"))
 raise SystemExit(1 if fail else 0)
