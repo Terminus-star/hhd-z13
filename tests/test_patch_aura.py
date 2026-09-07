@@ -60,28 +60,40 @@ except SystemExit:
 src = open(path).read()
 label, anchor, body, sentinel, mode = m.AURA_PATCHES[0]
 
-# Once the patch is installed the anchor is GONE -- that is success, not
-# failure. So the two states are checked differently: an unpatched file must
-# still accept the substitution, and a patched one is verified on its result.
-# The earlier version of this test asserted the anchor unconditionally and
-# started failing the moment the patch it tests was actually applied.
-patched_already = m.MARK_AURA in src
+# Always exercise the TABLE against a PRISTINE driver, never against whatever
+# is installed. Two earlier versions of this test got that wrong in opposite
+# directions: the first asserted the anchor unconditionally and began failing
+# the moment the patch was applied, and the second tested the installed file,
+# so it reported three failures when the installed patch was merely an OLDER
+# body. Neither is a defect in the table, which is what this file is for.
+#
+# The patcher's own .z13-orig backup is the pristine copy, and it is written
+# before the first patch, so it always exists on a patched machine.
+backup = path + ".z13-orig"
+if os.path.exists(backup) and m.MARK_AURA not in open(backup).read():
+    src = open(backup).read()
+    print(f"  note: testing the table against {os.path.basename(backup)}")
+elif m.MARK_AURA in src:
+    print("  SKIP  driver is patched and no pristine backup exists")
+    raise SystemExit(0)
 
-if patched_already:
-    print("  note: installed driver is already patched; verifying the result")
-    ok(src.count(anchor) == 0,
-       "the anchor is consumed once the patch is applied")
-    out = src
-else:
-    ok(src.count(anchor) == 1,
-       f"the anchor is unique in the unpatched driver ({src.count(anchor)})")
-    out = src.replace(anchor, body.format(mark=m.MARK_AURA))
-    ok(out != src, "the substitution applies")
+ok(src.count(anchor) == 1,
+   f"the anchor is unique in the pristine driver ({src.count(anchor)})")
+out = src.replace(anchor, body.format(mark=m.MARK_AURA))
+ok(out != src, "the substitution applies")
 
-    # Re-applying must not double the body. apply_marked skips on the
-    # sentinel, but the table itself should be idempotent under replace().
-    ok(out.replace(anchor, body.format(mark=m.MARK_AURA)) == out,
-       "a second application changes nothing")
+# Re-applying must not double the body. apply_marked skips on the sentinel,
+# but the table itself should be idempotent under replace().
+ok(out.replace(anchor, body.format(mark=m.MARK_AURA)) == out,
+   "a second application changes nothing")
+
+# Whether the INSTALLED file matches the current table is a separate question
+# from whether the table is correct, and it is worth reporting rather than
+# asserting -- a stale patch is fixed by --revert then install.sh.
+installed = open(path).read()
+if m.MARK_AURA in installed and "self.queue_apply[dev[" not in installed:
+    print("  note: the INSTALLED patch is an older body; "
+          "run hhd-patches --revert then install.sh")
 ok(m.MARK_AURA in out, "and leaves the mark, so --check can see it")
 ok(sentinel in out, "and the sentinel apply_marked tests for")
 
@@ -100,11 +112,40 @@ ok(i_wake < i_guard,
 ok(out.count('ev.get("event") == "wakeup"') == 1,
    "exactly one wakeup block, not a doubled body")
 
-# init=True is the mechanism: it is what routes the device back through
-# update()'s startup path, which rewrites the full per-device config.
-ok('dev["init"] = True' in out, "devices are marked dirty via init")
+# queue_apply is the mechanism, and NOT init. Setting init fires the handshake
+# immediately; after a hibernate the USB device has power-cycled and is still
+# re-enumerating, so that write fails, update() marks the device disabled and
+# drops it, and the settings rebuild that follows resets the TDP custom value
+# to its default. One transient write cost an RGB section and a wattage.
+ok("self.queue_apply[dev[" in out, "the resume re-apply is QUEUED")
+ok('dev["init"] = True' not in out,
+   "and does not force an immediate init handshake")
+ok("time.perf_counter() + 4.0" in out,
+   "with a delay long enough for the device to re-enumerate")
 ok('if not dev["disabled"]' in out,
-   "and a disabled device is left alone rather than re-initialised")
+   "a disabled device is skipped here rather than written to")
+
+# --- entry 2: a failed device must be able to come back -------------------
+# update() disables a device on ANY write error and get_aura_devices() then
+# skips it forever, because it only opens paths it does not already know.
+labels = [e[0] for e in m.AURA_PATCHES]
+ok("device-revive" in labels, f"the revive entry exists ({labels})")
+
+rev = [e for e in m.AURA_PATCHES if e[0] == "device-revive"][0]
+r_anchor, r_body, r_sentinel = rev[1], rev[2], rev[3]
+ok(out.count(r_anchor) >= 1, "its anchor is present in the pristine driver")
+if r_sentinel not in out:
+    r_out = out.replace(r_anchor, r_body.format(mark=m.MARK_AURA), 1)
+    ok(r_sentinel in r_out, "the revive substitution applies")
+    import ast as _ast
+    try:
+        _ast.parse(r_out)
+        ok(True, "and the result is valid Python")
+    except SyntaxError as e:
+        ok(False, f"and the result is valid Python ({e})")
+    # It must drop the entry BEFORE rediscovery, or rediscovery skips it.
+    ok(r_out.index("_z13_dead") < r_out.index("self.devices, updated ="),
+       "the dead entry is dropped before get_aura_devices runs")
 
 # The patcher must report it, or a silent failure looks like success.
 ok(m.MARK_AURA == "z13-aura-wake",

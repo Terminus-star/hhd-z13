@@ -1082,21 +1082,59 @@ AURA_PATCHES = (
         "    def notify(self, events):\n        if not self.tdp_changes:\n            return\n",
         """\
     def notify(self, events):
-        # {mark}: mark every device dirty on resume so update() rewrites the
-        # configured mode. Deliberately placed BEFORE the tdp_changes guard
-        # below -- upstream's own version of this sits after it, inside the
-        # match, where it can only run for users who enabled an unrelated
-        # option. A resume has to reach it either way.
+        # {mark}: on resume, queue a re-apply of each device's configured mode.
+        #
+        # Deliberately placed BEFORE the tdp_changes guard below -- upstream's
+        # own version of this sits after it, inside the match, where it can
+        # only run for users who enabled an unrelated option. A resume has to
+        # reach it either way.
+        #
+        # queue_apply, NOT init. The first version of this set init=True, which
+        # fires the handshake immediately -- and after a HIBERNATE the USB
+        # device has power-cycled and is still re-enumerating, so that write
+        # failed, update() marked the keyboard disabled and dropped it, and the
+        # resulting settings rebuild reset the TDP custom value to its default.
+        # One transient write turned into a missing RGB section and a wrong
+        # wattage. Observed 2026-09-07 16:23:17.
+        #
+        # A queued apply re-sends the configured mode (B3 + SET + APPLY)
+        # without the handshake, and lands after the deadline rather than
+        # immediately, so the device has settled by then.
         for ev in events:
             if ev.get("type") == "special" and ev.get("event") == "wakeup":
                 for dev in self.devices.values():
                     if not dev["disabled"]:
-                        dev["init"] = True
+                        self.queue_apply[dev["cfg_name"]] = (
+                            time.perf_counter() + 4.0
+                        )
 
         if not self.tdp_changes:
             return
 """,
         'ev.get("event") == "wakeup"',
+        "replace",
+    ),
+    (
+        "device-revive",
+        "        self.devices, updated = get_aura_devices(self.devices)\n",
+        """\
+        # {mark}: let a device that failed a write come back.
+        #
+        # update() marks a device disabled and closes it on ANY write error,
+        # and get_aura_devices() then skips it forever, because it only opens
+        # paths it does not already know. One transient failure -- a USB
+        # power-cycle across hibernate is the reliable way to get one --
+        # removes the RGB controls for that device until hhd restarts.
+        #
+        # Dropping the entry here instead means the next line rediscovers it,
+        # opens a fresh handle and re-inits it. If the device is genuinely
+        # gone, enumeration will not find it and it stays gone, which is the
+        # correct outcome; the retry costs one open() per tick at worst.
+        for _z13_dead in [k for k, v in self.devices.items() if v["disabled"]]:
+            del self.devices[_z13_dead]
+        self.devices, updated = get_aura_devices(self.devices)
+""",
+        "_z13_dead",
         "replace",
     ),
 )
