@@ -1180,26 +1180,6 @@ AURA_PATCHES = (
 # debounced apply path (APPLY_DELAY, already in the file) take it from there.
 # No immediate write here, no new write path -- just stop the driver from
 # believing a resume is a no-op.
-#
-# SECOND SYMPTOM, same underlying cause, no hibernate/resume involved: the
-# battery charged to 100% while charge_control_end_threshold continuously
-# read the correct 80 the whole time, AC plugged in continuously, no config
-# change in between (2026-09-09, z13ctl-plus's own implementation -- the
-# reference this driver's design was modeled on -- has the identical gap:
-# grep its daemon.go, the threshold write only happens once at process
-# startup, never on a timer or a resume). The write is a one-shot EC command,
-# not a persistent ceiling, on this hardware -- the same false assumption as
-# the hibernate case above, just triggered by staying plugged in long enough
-# rather than by a power cycle. Two more entries close it: invalidate the
-# same cache on an AC/DC transition too (immediate re-apply on plugging in,
-# same notify() this mark already patches), and an unconditional periodic
-# re-write in update() (RECHECK_INTERVAL) for the case where nothing ever
-# transitions -- a long continuous AC session with the EC quietly dropping
-# the limit and nothing else around to notice. Deliberately not a read-back-
-# and-compare: charge_control_end_threshold read the correct 80 throughout
-# the actual incident, so a correct-looking readback is not evidence the
-# limit is still enforced -- there is nothing to compare against, only the
-# write itself to periodically re-issue.
 ADJUSTOR_BATTERY_PATCHES = (
     (
         "wakeup-recharge",
@@ -1212,123 +1192,15 @@ ADJUSTOR_BATTERY_PATCHES = (
         # re-applies it -- even if the EC's own threshold was reset by the
         # power cycle a hibernate performs. Invalidate the cached value here;
         # update()'s existing debounced apply path does the actual write.
-        #
-        # Also invalidate on an AC/DC transition (adjustor's own event for
-        # this, see drivers/asus/__init__.py's "Power adapter status
-        # switched" handling) so plugging in re-asserts the limit right
-        # away, rather than waiting for the periodic recheck below.
         for ev in events:
             if ev.get("type") == "special" and ev.get("event") == "wakeup":
                 self.charge_limit_prev = None
                 self.charge_bypass_prev = None
-            elif ev.get("type") == "acpi" and ev.get("event") in ("ac", "dc"):
-                self.charge_limit_prev = None
 
     def update(self, conf: Config):
         self.enabled = self.always_enable or conf.get("hhd.settings.tdp_ready", False)
 """,
         "self.charge_limit_prev = None\n                self.charge_bypass_prev = None",
-        "replace",
-    ),
-    (
-        "periodic-recheck-consts",
-        "APPLY_DELAY = 0.7\n",
-        """\
-APPLY_DELAY = 0.7
-
-# {mark}: adjustor's charge-limit write is a one-shot "stop charging once you
-# hit this now" EC command on this hardware, not a persistent ceiling it
-# enforces going forward -- confirmed by observing the battery charge to
-# 100% while charge_control_end_threshold continuously read the correct
-# percentage the whole time, AC plugged in continuously, no config change
-# in between. RECHECK_INTERVAL bounds how long an overcharge can go
-# unnoticed during a single long AC session; CHARGE_LIMIT_VALUES gives the
-# recheck (and the existing apply switch below) one shared source of truth.
-RECHECK_INTERVAL = 120
-CHARGE_LIMIT_VALUES = {{"p65": 65, "p70": 70, "p80": 80, "p85": 85, "p90": 90, "p95": 95}}
-""",
-        "RECHECK_INTERVAL = 120",
-        "replace",
-    ),
-    (
-        "periodic-recheck-init",
-        "        self.charge_limit_prev = None\n\n        self.always_enable = always_enable\n",
-        """\
-        self.charge_limit_prev = None
-        self.next_charge_recheck = 0.0  # {mark}
-
-        self.always_enable = always_enable
-""",
-        "self.next_charge_recheck = 0.0",
-        "replace",
-    ),
-    (
-        "periodic-recheck-apply",
-        """\
-                self.queue_charge_limit = None
-                self.charge_limit_prev = lim
-
-                match lim:
-                    case "p65":
-                        set_charge_limit(self.charge_limit_fn, 65)
-                    case "p70":
-                        set_charge_limit(self.charge_limit_fn, 70)
-                    case "p80":
-                        set_charge_limit(self.charge_limit_fn, 80)
-                    case "p85":
-                        set_charge_limit(self.charge_limit_fn, 85)
-                    case "p90":
-                        set_charge_limit(self.charge_limit_fn, 90)
-                    case "p95":
-                        set_charge_limit(self.charge_limit_fn, 95)
-                    case "disabled":
-                        # Avoid writing charge limit on startup if
-                        # disabled, so that if user does not use us
-                        # we do not overwrite their setting.
-                        if not self.startup:
-                            set_charge_limit(self.charge_limit_fn, 100)
-""",
-        """\
-                self.queue_charge_limit = None
-                self.charge_limit_prev = lim
-                self.next_charge_recheck = curr + RECHECK_INTERVAL
-
-                match lim:
-                    case "p65":
-                        set_charge_limit(self.charge_limit_fn, 65)
-                    case "p70":
-                        set_charge_limit(self.charge_limit_fn, 70)
-                    case "p80":
-                        set_charge_limit(self.charge_limit_fn, 80)
-                    case "p85":
-                        set_charge_limit(self.charge_limit_fn, 85)
-                    case "p90":
-                        set_charge_limit(self.charge_limit_fn, 90)
-                    case "p95":
-                        set_charge_limit(self.charge_limit_fn, 95)
-                    case "disabled":
-                        # Avoid writing charge limit on startup if
-                        # disabled, so that if user does not use us
-                        # we do not overwrite their setting.
-                        if not self.startup:
-                            set_charge_limit(self.charge_limit_fn, 100)
-            elif lim in CHARGE_LIMIT_VALUES and curr > self.next_charge_recheck:
-                # {mark}: unconditional, not a read-back-and-compare. The
-                # write above only fires on a config change, and a readback
-                # cannot tell the two failure modes apart: the sysfs file
-                # itself drifting to a different value (which a compare
-                # *would* catch) versus the file continuing to read the
-                # value we asked for while the EC silently stops honouring
-                # it (confirmed live -- charge_control_end_threshold read
-                # the correct 80 the entire time the battery charged past it
-                # to 100%). A correct-looking readback is not evidence the
-                # limit is still enforced, so there is nothing to compare
-                # against -- just re-issue the write itself, periodically,
-                # for as long as this mode stays selected.
-                self.next_charge_recheck = curr + RECHECK_INTERVAL
-                set_charge_limit(self.charge_limit_fn, CHARGE_LIMIT_VALUES[lim])
-""",
-        "elif lim in CHARGE_LIMIT_VALUES and curr > self.next_charge_recheck:",
         "replace",
     ),
 )
@@ -1371,7 +1243,7 @@ def main():
         print(f"  {'adjustor/asus':14s} {'tdp-presets':12s} {marked_state(a_asus, ADJUSTOR_ASUS_PATCHES)}")
         print(f"  {'adjustor/hhd.py':14s} {'tdp-presets':12s} {marked_state(a_init, ADJUSTOR_INIT_PATCHES)}")
         print(f"  {'aura/__init__':14s} {'wake-reinit':12s} {marked_state(a_aura, AURA_PATCHES)}")
-        print(f"  {'adjustor/batt':14s} {'batt-recheck':12s} {marked_state(a_batt, ADJUSTOR_BATTERY_PATCHES)}")
+        print(f"  {'adjustor/batt':14s} {'wake-recharge':12s} {marked_state(a_batt, ADJUSTOR_BATTERY_PATCHES)}")
         return
 
     if mode == "--revert":
