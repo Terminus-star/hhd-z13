@@ -205,15 +205,29 @@ class Z13TdpPlugin(HHDPlugin):
 
         self.old_ac = None         # None = no previous source to compare to
         self._hold = None          # (mode, deadline) while a transition settles
-        # Start ARMED. A fresh boot is a power change nobody watched, exactly
-        # like the hibernate case notify() exists for: the machine can be shut
-        # down on AC and started on battery, and the mode restored from
-        # state.yml is whatever the previous session ended on. There is no
-        # edge, so an adopt-only first tick would leave the wrong preset in
-        # place until the next unplug -- the same symptom, reached by booting
-        # instead of resuming. Arming here makes the first tick re-evaluate
-        # against the CURRENT source, through the resume path below.
+        # Start ARMED. A fresh boot (or a plain hhd restart) is a power change
+        # nobody watched, exactly like the hibernate case notify() exists for:
+        # the machine can be shut down on AC and started on battery, and the
+        # mode restored from state.yml is whatever the previous session ended
+        # on. There is no edge, so an adopt-only first tick would leave the
+        # wrong preset in place until the next unplug -- the same symptom,
+        # reached by booting instead of resuming. Arming here makes the first
+        # tick re-evaluate against the CURRENT source, through the resume
+        # path below.
+        #
+        # Deliberately NOT self._resume (below) too: that flag exists so this
+        # startup case gets the SHORT hold, not the RESUME one. A plain
+        # restart has none of the race RESUME_HOLD_S is sized for -- adjustor
+        # and the desktop's power stack were never asleep, they kept running
+        # the whole time -- so treating "hhd just started" as "the machine
+        # just woke up" was arming a 60s lock on every restart for no reason.
+        # Bug: restarting hhd to "unstick" a locked TDP dropdown just re-arms
+        # a fresh 60s lock, which looks exactly like "only a restart works"
+        # right up until you restart three times in ten minutes and it never
+        # clears. Confirmed from the journal 2026-09-09: hhd restarted at
+        # 09:48, 10:00 and 10:15, each restart re-arming the full resume hold.
         self._recheck = True
+        self._resume = False       # True only for a GENUINE detected sleep
         # Wall/monotonic pair for our own sleep detector. See _detect_sleep().
         self._last_wall = None
         self._last_mono = None
@@ -278,6 +292,7 @@ class Z13TdpPlugin(HHDPlugin):
         logger.info(f"Detected {slept:.0f}s asleep that hhd did not report; "
                     f"re-evaluating")
         self._recheck = True
+        self._resume = True
         if self.emit:
             try:
                 self.emit({"type": "special", "event": "wakeup"})
@@ -302,6 +317,7 @@ class Z13TdpPlugin(HHDPlugin):
         for ev in events:
             if ev.get("type") == "special" and ev.get("event") == "wakeup":
                 self._recheck = True
+                self._resume = True
 
     # ── the store ─────────────────────────────────────────────────────────
     def _load(self):
@@ -586,12 +602,14 @@ class Z13TdpPlugin(HHDPlugin):
             # it is switched back on. Enabling adopts the current source; the
             # next real transition is what acts.
             self._recheck = False
+            self._resume = False
             return
         ac = _on_ac()
         if ac is None:
             return  # unreadable: leave everything alone rather than guess
 
         recheck, self._recheck = self._recheck, False
+        resume, self._resume = self._resume, False
 
         if self.old_ac is None:
             self.old_ac = ac
@@ -608,7 +626,13 @@ class Z13TdpPlugin(HHDPlugin):
         target = conf.get(f"{POWER}.enabled.{key}", "")
         if target in STOCK_MODES or self._preset(target) is not None:
             logger.info(f"Power source -> {'AC' if ac else 'battery'}: {target}")
-            hold = RESUME_HOLD_S if recheck else HOLD_S
+            # RESUME_HOLD_S only for a GENUINE detected sleep (resume), never
+            # for the startup-only recheck armed in __init__: a plain hhd
+            # restart has none of the desktop-power-stack race that 60s hold
+            # is sized for, and treating every restart as a "resume" meant
+            # restarting hhd to un-stick a locked TDP dropdown just re-armed
+            # a fresh 60s lock -- see __init__'s comment.
+            hold = RESUME_HOLD_S if resume else HOLD_S
             # Armed even when the mode is ALREADY the target: the overwrite
             # lands seconds later, so arming only on a change would leave the
             # common case unprotected.
