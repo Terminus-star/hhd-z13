@@ -1,0 +1,457 @@
+diff --git a/src/components/ExpandedUi.tsx b/src/components/ExpandedUi.tsx
+index 4ba33f1..767aad4 100644
+--- a/src/components/ExpandedUi.tsx
++++ b/src/components/ExpandedUi.tsx
+@@ -22,6 +22,8 @@ import HhdTabbedState from "./TabbedState";
+ import { CONTENT_WIDTH, Logo, getScrollbarStyle } from "./theme";
+ 
+ import hhdSlice, {
++  HEADER_CLOSE,
++  HEADER_MODE,
+   selectAppType,
+   selectCurrentTheme,
+   selectHasController,
+@@ -29,9 +31,15 @@ import hhdSlice, {
+ } from "../model/slice";
+ 
+ import { useEffect, useState } from "react";
+-import { useFilter, useIsLocal, useLogout } from "../model/hooks";
++import {
++  useFilter,
++  useHeaderNav,
++  useIsLocal,
++  useLogout,
++} from "../model/hooks";
+ import { ControllerButton } from "./Controller";
+ import { HintModal } from "./elements/HintModal";
++import { getFocusRingStyle } from "./elements/utils";
+ 
+ const ExpandedUi = () => {
+   const appType = useSelector(selectAppType);
+@@ -44,6 +52,9 @@ const ExpandedUi = () => {
+   const dispatch = useDispatch();
+   const logout = useLogout();
+   const distro = useSelector(selectCurrentTheme);
++  // Called here, above the early return further down: hooks must run on every render.
++  const modeNav = useHeaderNav<HTMLButtonElement>(HEADER_MODE);
++  const closeNav = useHeaderNav<HTMLButtonElement>(HEADER_CLOSE);
+ 
+   const isOpen = appType !== "overlay" || uiType === "expanded";
+ 
+@@ -148,13 +159,20 @@ const ExpandedUi = () => {
+             </Button>
+           )}
+           {appType == "app" && (
+-            <Button margin="0 0 0 1rem" onClick={() => window.close()}>
++            <Button
++              ref={closeNav.ref}
++              margin="0 0 0 1rem"
++              {...getFocusRingStyle(closeNav.focus)}
++              onClick={() => window.close()}
++            >
+               <CloseIcon />
+             </Button>
+           )}
+           {appType == "overlay" && (
+             <Button
++              ref={modeNav.ref}
+               margin="0 0 0 1rem"
++              {...getFocusRingStyle(modeNav.focus)}
+               onClick={() => dispatch(hhdSlice.actions.setUiType("qam"))}
+             >
+               {controller && (
+diff --git a/src/components/QamState.tsx b/src/components/QamState.tsx
+index 1e86a80..a9ff57a 100644
+--- a/src/components/QamState.tsx
++++ b/src/components/QamState.tsx
+@@ -13,8 +13,14 @@ import {
+ import { capitalize } from "lodash";
+ import { useEffect, useState } from "react";
+ import { useDispatch, useSelector } from "react-redux";
+-import { useShouldRenderChild, useShouldRenderParent } from "../model/hooks";
++import {
++  useHeaderNav,
++  useShouldRenderChild,
++  useShouldRenderParent,
++} from "../model/hooks";
+ import hhdSlice, {
++  HEADER_CLOSE,
++  HEADER_MODE,
+   selectAppType,
+   selectHasController,
+   selectSectionNames,
+@@ -24,6 +30,7 @@ import hhdSlice, {
+ import { ControllerButton } from "./Controller";
+ import ErrorBoundary from "./ErrorBoundary";
+ import ContainerComponent from "./elements/ContainerComponent";
++import { getFocusRingStyle } from "./elements/utils";
+ import { Logo, QAM_WIDTH } from "./theme";
+ 
+ const QamState = () => {
+@@ -35,6 +42,9 @@ const QamState = () => {
+   const fullSettings = useSelector(selectSettings);
+   const shouldRenderParent = useShouldRenderParent(true);
+   const shouldRenderChild = useShouldRenderChild(true);
++  // Called here, above the early return below: hooks must run on every render.
++  const modeNav = useHeaderNav<HTMLButtonElement>(HEADER_MODE);
++  const closeNav = useHeaderNav<HTMLButtonElement>(HEADER_CLOSE);
+ 
+   const settings = Object.fromEntries(
+     Object.entries(fullSettings).filter((c) => shouldRenderParent(c[1]))
+@@ -92,7 +102,9 @@ const QamState = () => {
+             </Heading>
+             <Box flexGrow="3"></Box>
+             <Button
++              ref={modeNav.ref}
+               margin="0 0 0 1rem"
++              {...getFocusRingStyle(modeNav.focus)}
+               onClick={() => dispatch(hhdSlice.actions.setUiType("expanded"))}
+             >
+               <ArrowLeftIcon h="1.7rem" />
+@@ -106,7 +118,9 @@ const QamState = () => {
+               )}
+             </Button>
+             <Button
++              ref={closeNav.ref}
+               margin="0 0 0 1rem"
++              {...getFocusRingStyle(closeNav.focus)}
+               onClick={() => dispatch(hhdSlice.actions.setUiType("closed"))}
+             >
+               <CloseIcon h="1.7rem" />{" "}
+diff --git a/src/components/elements/utils.tsx b/src/components/elements/utils.tsx
+index f18cbdf..1cdff36 100644
+--- a/src/components/elements/utils.tsx
++++ b/src/components/elements/utils.tsx
+@@ -1,10 +1,34 @@
+ const BRIGHTNESS_DEFAULT = 50;
+ 
++// hhd-z13 addition: highlight for the header BUTTONS (Y / close).
++//
++// getFocusStyle() below suits rows of settings, which sit on a plain
++// background. These buttons are solid brand-coloured themselves, so a gold ring
++// drawn directly against them would vanish. The first ring is therefore the
++// page's own background colour: a visible gap, then the gold ring, then a glow.
++// Only paint properties are used (no padding / margin / border) so the button's
++// size and the header layout do not shift when the highlight moves.
++export const getFocusRingStyle = (f: boolean) => ({
++  transition: "all 0.1s ease-in-out",
++  ...(f && {
++    boxShadow:
++      "0 0 0 3px var(--chakra-colors-chakra-body-bg), 0 0 0 6px var(--chakra-colors-brand-400), 0 0 18px 7px var(--chakra-colors-brand-500)",
++    transform: "scale(1.1)",
++    zIndex: "10",
++  }),
++});
++
+ export const getFocusStyle = (f: boolean, mode: string) =>
+   f
+     ? {
+         border: "2px",
+-        borderColor: mode === "dark" ? "gray.500" : "gray.300",
++        // hhd-z13: the stock highlight was a gray border on a gray background,
++        // easy to lose once the selection is driven from a keyboard. The
++        // theme's accent colour (brand) plus a glow can't be missed, and it
++        // follows whichever theme is active instead of hardcoding a colour.
++        borderColor: "brand.400",
++        boxShadow:
++          "0 0 0 2px var(--chakra-colors-brand-400), 0 0 14px 3px var(--chakra-colors-brand-500)",
+         borderStyle: "solid",
+         borderRadius: "8px",
+         transform: "scale(1.05)",
+diff --git a/src/main.tsx b/src/main.tsx
+index d8b0064..1618ae9 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -19,7 +19,10 @@ import { PersistGate } from "redux-persist/integration/react";
+ import ExpandedUi from "./components/ExpandedUi.tsx";
+ import QamState from "./components/QamState.tsx";
+ import { EditModal } from "./components/elements/EditModal.tsx";
+-import { setupGamepadEventListener } from "./model/controller.tsx";
++import {
++  setupGamepadEventListener,
++  setupKeyboardEventListener,
++} from "./model/controller.tsx";
+ import * as electronUtils from "./model/electron.tsx";
+ import {
+   useInitialLogin,
+@@ -49,8 +52,9 @@ declare global {
+ // Inject electron utils
+ window.electronUtils = electronUtils;
+ 
+-// Setup gamepad listener
++// Setup input listeners
+ setupGamepadEventListener();
++setupKeyboardEventListener();
+ 
+ function App() {
+   const { colorMode } = useColorMode();
+diff --git a/src/model/controller.tsx b/src/model/controller.tsx
+index efaaccf..c3fe284 100644
+--- a/src/model/controller.tsx
++++ b/src/model/controller.tsx
+@@ -1,6 +1,8 @@
+ import { DiscreteSetting, MultipleSetting, NumberSetting } from "./common";
+ import local from "./local";
+ import hhdSlice, {
++  HEADER_CLOSE,
++  HEADER_MODE,
+   selectAppType,
+   selectControllersApi,
+   selectFocusedPath,
+@@ -41,6 +43,45 @@ const AXIS_MAP: [string, number, boolean][] = [
+   ["down", 1, false],
+ ];
+ 
++const KEYBOARD_MAP: Record<string, string> = {
++  ArrowUp: "dpad_up",
++  ArrowDown: "dpad_down",
++  ArrowLeft: "dpad_left",
++  ArrowRight: "dpad_right",
++  Enter: "a",
++  Escape: "b",
++};
++
++// hhd-z13 addition: the bumpers and a second D-pad. q / e switch tabs the way
++// LB / RB do, and W A S D mirror the arrow keys (up / left / down / right), so
++// the left hand can drive the whole UI like a gamepad.
++//
++// Matched by PHYSICAL key (event.code), not by the character (event.key). With
++// a non-Latin layout active (e.g. Arabic) event.key is a different character
++// and these would silently stop working; event.code is the same on every
++// layout. Text fields are exempt (see the listener below), so typing a w, a, s
++// or d into one is unaffected.
++const KEYBOARD_CODE_MAP: Record<string, string> = {
++  KeyQ: "lb",
++  KeyE: "rb",
++  KeyW: "dpad_up",
++  KeyA: "dpad_left",
++  KeyS: "dpad_down",
++  KeyD: "dpad_right",
++};
++
++// hhd-z13 addition: translate a key press into a controller command.
++//
++// Tab / Shift+Tab step through the settings like D-pad down / up. That routes
++// them through the same selection model the controller uses (which is what
++// draws the highlight), instead of moving the browser's own DOM focus, which
++// this UI never highlights. Shift+Tab is Steam's Guide hotkey inside gamescope
++// and never arrives there, but works on a plain desktop.
++const getKeyboardCommand = (event: KeyboardEvent): string | undefined => {
++  if (event.key === "Tab") return event.shiftKey ? "dpad_up" : "dpad_down";
++  return KEYBOARD_MAP[event.key] ?? KEYBOARD_CODE_MAP[event.code];
++};
++
+ declare global {
+   interface Window {
+     controllerInterval: number | undefined;
+@@ -51,6 +92,20 @@ const goIn = (s: typeof store) => {
+   const state = s.getState();
+   const setting = selectFocusedSetting(state);
+   const path = selectFocusedPath(state);
++
++  // hhd-z13 addition: the header buttons are not settings, so act on them
++  // directly instead of falling through to the setting logic below.
++  if (path === HEADER_MODE) {
++    // QAM <-> expanded view, same as pressing Y on a controller.
++    s.dispatch(hhdSlice.actions.toggleUiType());
++    return;
++  }
++  if (path === HEADER_CLOSE) {
++    if (selectAppType(state) === "app") window.close();
++    else s.dispatch(hhdSlice.actions.setUiType("closed"));
++    return;
++  }
++
+   const isSel = selectIsSelected(path)(state);
+   const curr = selectSettingState(path)(state);
+   const selChoice = selectSelectedChoice(state);
+@@ -149,6 +204,22 @@ const goIn = (s: typeof store) => {
+ 
+ const goSideways = (s: typeof store, left: boolean) => {
+   const state = s.getState();
++
++  // hhd-z13 addition: left / right step between the header buttons (the Y
++  // button is drawn to the left of the close button) and never leave the
++  // header. Section selection mirrors selectFocusedPath().
++  const focused = selectFocusedPath(state);
++  if (focused === HEADER_MODE || focused === HEADER_CLOSE) {
++    const section =
++      state.hhd.uiType === "qam" && state.hhd.appType === "overlay"
++        ? "qam"
++        : state.hhd.navigation.curr["tab"];
++    const target = left ? HEADER_MODE : HEADER_CLOSE;
++    if (state.hhd.navigation.choices[section]?.includes(target))
++      s.dispatch(hhdSlice.actions.goto({ section, curr: target }));
++    return;
++  }
++
+   const { setting, path } = selectSelectedSetting(state);
+   if (!setting || !path) return;
+ 
+@@ -258,6 +329,46 @@ export const handleGamepadCommands = (evs: string[]) => {
+   }
+ };
+ 
++export const setupKeyboardEventListener = () => {
++  window.addEventListener(
++    "keydown",
++    (event) => {
++      const command = getKeyboardCommand(event);
++      if (!command || event.altKey || event.ctrlKey || event.metaKey) return;
++
++      const target = event.target;
++      if (
++        target instanceof HTMLElement &&
++        (target.isContentEditable ||
++          ["INPUT", "SELECT", "TEXTAREA"].includes(target.tagName) ||
++          // hhd-z13 addition: leave keys alone inside a dialog -- EXCEPT the
++          // choice list of an opened dropdown. That modal (EditModal) is not a
++          // separate widget: it is the controller's own selection list, driven
++          // by navigation.sel / sel_choice, and the highlighted choice is
++          // DOM-focused, so the key target is always inside the dialog.
++          // Skipping keys there left the list impossible to move through.
++          // While a selection is open the model owns the keys; any other
++          // dialog still gets its keys left alone, since its own buttons need
++          // Tab / Enter / Escape and intercepting them would drive the UI
++          // behind it instead.
++          (!selectHasSelection(store.getState()) &&
++            target.closest('[role="dialog"], [role="alertdialog"]')))
++      )
++        return;
++
++      if (!selectIsOpen(store.getState())) return;
++
++      event.preventDefault();
++      event.stopPropagation();
++
++      if (event.repeat && (command === "a" || command === "b")) return;
++      store.dispatch(hhdSlice.actions.setController(true));
++      handleGamepadCommands([command]);
++    },
++    { capture: true }
++  );
++};
++
+ export const setupGamepadEventListener = () => {
+   let state: Record<string, Record<string, number | null>> = {};
+   let focused = true;
+diff --git a/src/model/hooks.tsx b/src/model/hooks.tsx
+index 964d0f6..38fe521 100644
+--- a/src/model/hooks.tsx
++++ b/src/model/hooks.tsx
+@@ -5,6 +5,7 @@ import hhdSlice, {
+   selectAppType,
+   selectDisabledTooltip,
+   selectError,
++  selectFocusedPath,
+   selectIsLoggedIn,
+   selectIsSelected,
+   selectLoadCounter,
+@@ -61,6 +62,28 @@ export function useElementNav<T extends HTMLElement>(
+   return { ref, focus, sel, setFocus };
+ }
+ 
++// hhd-z13 addition: like useElementNav, but for the header buttons (Y / close).
++// Those are not settings and live outside any section, so "am I the highlighted
++// item" is simply "is my pseudo-path the one the selection model points at,
++// while controller / keyboard navigation is active".
++export function useHeaderNav<T extends HTMLElement>(path: string) {
++  const ref = useRef<T>(null);
++
++  const focus = useSelector(
++    (state: RootState) =>
++      state.hhd.controller && selectFocusedPath(state) === path
++  );
++  const smooth = useSelector((state: RootState) => state.hhd.navigation.smooth);
++
++  // Moving up from the first setting must bring a scrolled-away header back.
++  useEffect(() => {
++    if (focus && ref.current && smooth)
++      ref.current.scrollIntoView({ behavior: "smooth", block: "center" });
++  }, [focus, smooth]);
++
++  return { ref, focus };
++}
++
+ export const useSectionNav = (section: string) => {
+   const dispatch = useDispatch();
+ 
+diff --git a/src/model/slice.tsx b/src/model/slice.tsx
+index f09db9b..db073df 100644
+--- a/src/model/slice.tsx
++++ b/src/model/slice.tsx
+@@ -162,6 +162,9 @@ const slice = createSlice({
+     setAppType: (store, action: PayloadAction<AppType>) => {
+       store.appType = action.payload;
+       if (action.payload === "overlay") store.controller = true;
++      // Which header buttons exist depends on the app type, and the settings
++      // may already be loaded by the time it is set.
++      updateNavigation(store);
+     },
+     setError: (store, action: PayloadAction<string>) => {
+       store.error = action.payload;
+@@ -347,20 +350,48 @@ const slice = createSlice({
+   },
+ });
+ 
++// hhd-z13 addition: the header buttons are navigable items too.
++//
++// The Y button (switch between the QAM and the expanded view) and the close
++// button used to be reachable only by pressing Y / B on a controller, so a
++// keyboard could never select them and there was nothing to highlight. They now
++// sit at the FRONT of each view's item list, so Tab / the arrow keys walk up
++// into them from the first setting, and Enter activates the one that is
++// highlighted (see goIn in controller.tsx).
++//
++// The names deliberately contain NO dot: every setting path is "section.name",
++// and getSettingChain() answers "no such setting" for a dotless path, which
++// is exactly what these are. A dotted name would be looked up in
++// settings[section][name] and throw.
++export const HEADER_MODE = "@header-mode";
++export const HEADER_CLOSE = "@header-close";
++export const isHeaderPath = (path: string | undefined) =>
++  path === HEADER_MODE || path === HEADER_CLOSE;
++
++// Which header buttons each view actually draws, so only those can be selected.
++const HEADER_ITEMS_QAM = [HEADER_MODE, HEADER_CLOSE];
++function headerItemsFor(appType: AppType): string[] {
++  if (appType === "overlay") return [HEADER_MODE]; // the expanded view's Y button
++  if (appType === "app") return [HEADER_CLOSE]; // the window's close button
++  return [];
++}
++
+ function updateNavigation(state: AppState) {
+   if (!Object.keys(state.state).length || !Object.keys(state.settings).length)
+     return;
+ 
+   // QAMs
+   const shouldRenderQam = (c: Setting) => shouldRenderChild(c, QAM_FILTERS);
+-  const choices = getSectionElements(
++  const qamItems = getSectionElements(
+     state.settings,
+     state.state,
+     shouldRenderQam
+   );
++  const choices = [...HEADER_ITEMS_QAM, ...qamItems];
+   state.navigation.choices["qam"] = choices;
+   if (!choices.includes(state.navigation.curr["qam"])) {
+-    state.navigation.curr["qam"] = choices[0];
++    // Start on the first real setting, not on a header button.
++    state.navigation.curr["qam"] = qamItems[0] ?? choices[0];
+   }
+ 
+   // Tabs
+@@ -370,10 +401,11 @@ function updateNavigation(state: AppState) {
+   for (const [s, v] of Object.entries(state.settings)) {
+     const newS: Sections = {};
+     newS[s] = v;
+-    const choices = getSectionElements(newS, state.state, shouldRender);
++    const items = getSectionElements(newS, state.state, shouldRender);
++    const choices = [...headerItemsFor(state.appType), ...items];
+     state.navigation.choices[s] = choices;
+     if (!choices.includes(state.navigation.curr[s])) {
+-      state.navigation.curr[s] = choices[0];
++      state.navigation.curr[s] = items[0] ?? choices[0];
+     }
+   }
+ 

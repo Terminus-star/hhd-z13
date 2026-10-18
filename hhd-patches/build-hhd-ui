@@ -1,0 +1,131 @@
+#!/bin/bash
+# build-hhd-ui — build hhd-ui with keyboard navigation, install it BESIDE the
+# packaged one.
+#
+# Why this exists
+# ---------------
+# hhd-ui's gamepad logic is in every release, but its keyboard support is not:
+# upstream added it in commit 12b62e6 ("add intuitive keyboard support",
+# 2026-08-16), after v3.4.2, and it is unreleased. Without it the keyboard only
+# gets generic browser focus (Tab moves a DOM focus ring that this UI never
+# highlights), so nothing looks selected the way it does with a controller.
+#
+# What the patch does (hhd-ui-keyboard.patch, against the v3.4.2 tag)
+#   * upstream's commit: arrows -> D-pad, Enter -> A, Escape -> B
+#   * Tab / Shift+Tab -> D-pad down / up, so they drive the same selection model
+#     (and therefore the same highlight) as the controller
+#   * q / e -> LB / RB (previous / next tab), matched by physical key so they
+#     work on any keyboard layout
+#   * keys are left alone inside a dialog
+#   * the focus highlight uses the theme's accent colour plus a glow instead of
+#     gray-on-gray
+#
+# It is one self-contained diff against the exact tag, not a cherry-pick of an
+# upstream hash, so it keeps working if upstream rewrites history.
+#
+# What it installs
+# ----------------
+#     ~/.local/share/hhd-z13/hhd-ui/<version>-<patch hash>/   (main.js, static/...)
+#     ~/.local/share/hhd-z13/hhd-ui/current  -> the newest of those
+#
+# Old builds are never deleted. hhd-ui-wayland uses `current` when it exists
+# and falls back to /usr/lib/hhd-ui/app.asar otherwise, so a missing or broken
+# build can never leave you without a UI. The packaged hhd-ui is not touched.
+#
+# It deliberately does NOT use electron-builder (which downloads a whole
+# Electron runtime and builds an AppImage). The stock app is just main.js,
+# preload.js, package.json, art/ and the built static/ files, run by the
+# system's Electron, so that is exactly what is assembled here.
+#
+# Needs: git, node, npm. The first run downloads the npm dependencies.
+#
+#   ./build-hhd-ui          build and install
+#
+# Environment overrides:
+#   HHD_UI_SRC      source checkout (default: <repo>/scratch/hhd-ui-src)
+#   HHD_UI_PREFIX   install root (default: ~/.local/share/hhd-z13/hhd-ui)
+
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+REPO_ROOT=$(cd "$HERE/.." && pwd)
+PATCH="$HERE/hhd-ui-keyboard.patch"
+SRC="${HHD_UI_SRC:-$REPO_ROOT/scratch/hhd-ui-src}"
+PREFIX="${HHD_UI_PREFIX:-$HOME/.local/share/hhd-z13/hhd-ui}"
+UPSTREAM=https://github.com/hhd-dev/hhd-ui.git
+
+say() { echo "build-hhd-ui: $*"; }
+die() { echo "build-hhd-ui: $*" >&2; exit 1; }
+
+for t in git node npm; do
+    command -v "$t" >/dev/null 2>&1 || die "$t is missing."
+done
+[ -f "$PATCH" ] || die "patch not found: $PATCH"
+
+# Build the same version the system has installed, so the only difference from
+# the packaged app is the patch.
+ver=$(pacman -Q hhd-ui 2>/dev/null | awk '{print $2}' | cut -d- -f1)
+[ -n "$ver" ] || ver=3.4.2
+tag="v$ver"
+
+if [ ! -d "$SRC/.git" ]; then
+    say "cloning hhd-ui into $SRC"
+    mkdir -p "$(dirname "$SRC")" || exit 1
+    git clone "$UPSTREAM" "$SRC" || exit 1
+fi
+
+cd "$SRC" || exit 1
+git fetch --tags --quiet origin || true
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null \
+    || die "no upstream tag $tag; the patch is written against v3.4.2"
+
+# Re-applying onto a clean, detached tag each run keeps this idempotent. This
+# only resets TRACKED files in this build checkout; node_modules is ignored and
+# survives, so later runs skip the dependency download.
+git reset --hard --quiet || exit 1
+git checkout -q --detach "$tag" || exit 1
+
+if ! git apply --check "$PATCH" 2>/dev/null; then
+    die "the patch does not apply to $tag. If hhd-ui was upgraded past v3.4.2, hhd-ui-keyboard.patch needs rebasing (upstream may also have shipped keyboard support by now)."
+fi
+git apply "$PATCH" || exit 1
+say "patch applied on $tag"
+
+if [ ! -d node_modules ]; then
+    say "installing npm dependencies (first run only; this takes a while)"
+    npm ci --no-audit --no-fund --loglevel=error || die "npm ci failed"
+fi
+
+# Type-check first: cheaper and clearer than a failure deep inside the bundler.
+say "type-checking"
+npx tsc --noEmit || die "type check failed"
+
+say "building the web app"
+npm run electron-build || die "vite build failed"
+
+# Sanity: the keyboard code must be in the bundle, or the patch did not land.
+bundle=$(ls electron/static/build/assets/index-*.js 2>/dev/null | head -1)
+[ -n "$bundle" ] || die "no built bundle found under electron/static/build/assets"
+grep -q "KeyQ" "$bundle" || die "built bundle has no q/e key mapping; the patch did not land"
+say "bundle contains the keyboard mapping ($bundle)"
+
+# Assemble the app: exactly what the stock asar holds. The version in
+# package.json is stamped the way upstream's PKGBUILD does it (source has a
+# placeholder); the NAME must stay dev.hhd.hhd-ui because hhd finds the window
+# by the WM_CLASS Electron derives from it.
+phash=$(sha256sum "$PATCH" | cut -c1-8)
+dest="$PREFIX/$ver-$phash"
+say "assembling $dest"
+mkdir -p "$dest" || exit 1
+cp -a electron/main.js electron/preload.js electron/README.md electron/art electron/static "$dest/" || exit 1
+sed "s|\"version\": \"1.0.0\"|\"version\": \"$ver\"|" electron/package.json > "$dest/package.json" || exit 1
+grep -q '"name": "dev.hhd.hhd-ui"' "$dest/package.json" || die "package.json name changed; hhd would not find the window"
+[ -f "$dest/static/build/index.html" ] || die "assembled app has no static/build/index.html"
+
+ln -sfn "$dest" "$PREFIX/current" || exit 1
+
+echo
+say "installed $dest"
+say "current -> $(readlink "$PREFIX/current")"
+say "hhd-ui-wayland picks this up automatically once the updated wrapper is installed"
+say "(sudo hhd-patches/install.sh); until then the packaged hhd-ui keeps running."

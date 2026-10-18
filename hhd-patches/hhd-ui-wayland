@@ -51,6 +51,21 @@
 #   existing rule keeps working.
 set -u
 
+# WHICH BUILD OF THE UI
+#   Use the keyboard-navigation build (hhd-patches/build-hhd-ui) when it has
+#   been installed, otherwise the packaged asar. It is always safe to remove:
+#   with no build present this behaves exactly as before.
+#
+#   The home directory comes from the passwd entry, not $HOME: hhd launches
+#   this wrapper from a root service after dropping privileges and does not
+#   promise a usable $HOME.
+HHD_UI_APP=/usr/lib/hhd-ui/app.asar
+_home=$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f6)
+_kbd_build="${_home:-${HOME:-}}/.local/share/hhd-z13/hhd-ui/current"
+if [ -f "$_kbd_build/main.js" ]; then
+    HHD_UI_APP="$_kbd_build"
+fi
+
 # hhd says which path launched us, so do not infer it (overlay.py):
 #   inject_overlay()    gamescope -> STEAM_OVERLAY=1
 #   launch_overlay_de() desktop   -> HHD_MANAGED=1
@@ -59,7 +74,7 @@ set -u
 # pass NO --class -- identical to stock hhd-ui. --class is actively HARMFUL
 # here, see the decoy-window note below.
 if [ "${STEAM_OVERLAY:-}" = "1" ]; then
-    exec electron --no-sandbox /usr/lib/hhd-ui/app.asar "$@"
+    exec electron --no-sandbox "$HHD_UI_APP" "$@"
 fi
 
 : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
@@ -120,8 +135,8 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ]; 
     exec electron --no-sandbox \
          --ozone-platform=wayland \
          --class=dev.hhd.hhd-ui \
-         /usr/lib/hhd-ui/app.asar "$@"
+         "$HHD_UI_APP" "$@"
 fi
 
 # No compositor reachable — behave exactly like stock hhd-ui.
-exec electron --no-sandbox --class=dev.hhd.hhd-ui /usr/lib/hhd-ui/app.asar "$@"
+exec electron --no-sandbox --class=dev.hhd.hhd-ui "$HHD_UI_APP" "$@"
